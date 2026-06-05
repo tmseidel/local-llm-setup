@@ -1,0 +1,134 @@
+---
+# ============================================================
+#  Test-Playbook — Rauchtest nach der Installation
+#  Prüft alle Dienste und sendet Test-Anfragen
+#
+#  Ausführen:
+#    ansible-playbook -i inventory.ini test.yml
+# ============================================================
+- name: LLM Stack testen
+  hosts: llm_host
+  gather_facts: false
+
+  tasks:
+    # ── Ollama ──────────────────────────────────────────────
+    - name: "Test 1: Ollama-Dienst läuft"
+      ansible.builtin.systemd:
+        name: ollama
+      register: ollama_service
+      failed_when: ollama_service.status.ActiveState != "active"
+      when: inference_engine == 'ollama'
+
+    - name: "Test 2: Ollama API erreichbar"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ ollama_port }}/api/tags"
+        method: GET
+        status_code: 200
+      register: api_test
+      when: inference_engine == 'ollama'
+
+    - name: "Test 3: Ollama-Modelle geladen"
+      ansible.builtin.assert:
+        that:
+          - api_test.json.models | length > 0
+        fail_msg: "Keine Modelle geladen! Führe '--tags models' aus."
+        success_msg: "{{ api_test.json.models | length }} Modell(e) in Ollama verfügbar."
+      when: inference_engine == 'ollama'
+
+    - name: "Test 4: Open WebUI erreichbar"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ open_webui_port }}"
+        method: GET
+        status_code: [200, 302]
+
+    - name: "Test 5: Ollama Chat-Completion (OpenAI-kompatibel)"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ ollama_port }}/v1/chat/completions"
+        method: POST
+        body_format: json
+        body:
+          model: "{{ ollama_models | first }}"
+          messages:
+            - role: user
+              content: "Antworte nur mit 'OK' wenn du funktionierst."
+          max_tokens: 10
+          stream: false
+        timeout: 120
+        status_code: 200
+      register: ollama_chat_test
+      when: inference_engine == 'ollama'
+
+    - name: "Test 5 Ergebnis (Ollama)"
+      ansible.builtin.debug:
+        msg: "Ollama-Antwort: {{ ollama_chat_test.json.choices[0].message.content }}"
+      when: inference_engine == 'ollama' and ollama_chat_test is not skipped
+
+    # ── vLLM (optional) ─────────────────────────────────────
+    - name: "Test 6: vLLM-Dienst läuft"
+      ansible.builtin.systemd:
+        name: vllm
+      register: vllm_service
+      failed_when: vllm_service.status.ActiveState != "active"
+      when: inference_engine == 'vllm'
+
+    - name: "Test 7: vLLM Health-Endpoint"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ vllm_port }}/health"
+        method: GET
+        status_code: 200
+      when: inference_engine == 'vllm'
+
+    - name: "Test 8: vLLM Modell-Liste"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ vllm_port }}/v1/models"
+        method: GET
+        status_code: 200
+      register: vllm_models_resp
+      when: inference_engine == 'vllm'
+
+    - name: "Test 8 Ergebnis (vLLM Modelle)"
+      ansible.builtin.debug:
+        msg: >
+          vLLM geladene Modelle:
+          {% for m in vllm_models_resp.json.data %}
+          • {{ m.id }}
+          {% endfor %}
+      when: inference_engine == 'vllm' and vllm_models_resp is defined
+
+    - name: "Test 9: vLLM Chat-Completion (OpenAI-kompatibel)"
+      ansible.builtin.uri:
+        url: "http://localhost:{{ vllm_port }}/v1/chat/completions"
+        method: POST
+        body_format: json
+        body:
+          model: "{{ vllm_model.split('/')[-1] }}"
+          messages:
+            - role: user
+              content: "Antworte nur mit 'OK' wenn du funktionierst."
+          max_tokens: 10
+          stream: false
+        timeout: 120
+        status_code: 200
+      register: vllm_chat_test
+      when: inference_engine == 'vllm'
+
+    - name: "Test 9 Ergebnis (vLLM)"
+      ansible.builtin.debug:
+        msg: "vLLM-Antwort: {{ vllm_chat_test.json.choices[0].message.content }}"
+      when: inference_engine == 'vllm' and vllm_chat_test is defined
+
+    # ── Zusammenfassung ──────────────────────────────────────
+    - name: Alle Tests bestanden
+      ansible.builtin.debug:
+        msg:
+          - "══════════════════════════════════════════════════"
+          - "  ✓ Alle Tests bestanden!"
+          - ""
+          - "  Ollama API: http://localhost:{{ ollama_port }}/v1"
+          - "  Open WebUI: http://localhost:{{ open_webui_port }}"
+          - "{% if vllm_enabled | bool %}  vLLM API:   http://localhost:{{ vllm_port }}/v1{% endif %}"
+          - ""
+          - "  Routing-Empfehlung:"
+          - "  • Einzel-Requests / Web-UI  → Ollama  :{{ ollama_port }}"
+          - "{% if vllm_enabled | bool %}  • Agenten / parallele Calls → vLLM    :{{ vllm_port }}{% endif %}"
+          - "══════════════════════════════════════════════════"

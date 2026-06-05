@@ -1,0 +1,42 @@
+---
+# ============================================================
+#  vLLM: Switch Model
+#  Changes the loaded model without reinstalling vLLM
+#
+#  Usage:
+#    ansible-playbook -i inventory.ini site.yml \
+#      --tags vllm_swap \
+#      -e "vllm_model=Qwen/Qwen2.5-Coder-32B-Instruct-AWQ"
+# ============================================================
+
+- name: Stop vLLM service
+  ansible.builtin.systemd:
+    name: "{{ vllm_service_name }}"
+    state: stopped
+
+- name: Redeploy start script with new model
+  ansible.builtin.template:
+    src: vllm_start.sh.j2
+    dest: "{{ vllm_install_dir }}/start.sh"
+    owner: "{{ vllm_user }}"
+    group: "{{ vllm_user }}"
+    mode: '0755'
+
+- name: Start vLLM service with new model
+  ansible.builtin.systemd:
+    name: "{{ vllm_service_name }}"
+    state: started
+
+- name: Wait for new model
+  ansible.builtin.uri:
+    url: "http://localhost:{{ vllm_port }}/health"
+    method: GET
+    status_code: 200
+  register: vllm_health
+  until: vllm_health.status == 200
+  retries: 60
+  delay: 10
+
+- name: Confirm model switch
+  ansible.builtin.debug:
+    msg: "✓ vLLM is now running with: {{ vllm_model }}"

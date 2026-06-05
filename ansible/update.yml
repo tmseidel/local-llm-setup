@@ -1,0 +1,73 @@
+---
+# ============================================================
+#  Update Playbook
+#  Updates Ollama, Open WebUI, vLLM, and all models
+#
+#  Run:
+#    ansible-playbook -i inventory.ini update.yml --ask-become-pass
+#
+#  Single components only:
+#    ... --tags ollama
+#    ... --tags webui
+#    ... --tags vllm
+#    ... --tags models
+# ============================================================
+- name: Update LLM Stack
+  hosts: llm_host
+  become: true
+
+  tasks:
+    - name: Update Ollama
+      ansible.builtin.shell:
+        cmd: curl -fsSL https://ollama.com/install.sh | sh
+      register: ollama_update
+      changed_when: "'updated' in ollama_update.stdout or 'installed' in ollama_update.stdout"
+      tags: ollama
+
+    - name: Restart Ollama
+      ansible.builtin.systemd:
+        name: ollama
+        state: restarted
+      tags: ollama
+
+    - name: Update Open WebUI Image
+      ansible.builtin.command:
+        cmd: docker pull ghcr.io/open-webui/open-webui:{{ open_webui_version }}
+      register: webui_pull
+      changed_when: "'Status: Downloaded newer image' in webui_pull.stdout"
+      tags: webui
+
+    - name: Restart Open WebUI Container (after Image Update)
+      ansible.builtin.command: docker restart open-webui
+      when: webui_pull.changed
+      tags: webui
+
+    - name: Update vLLM
+      ansible.builtin.include_role:
+        name: vllm
+        tasks_from: update
+      tags: vllm
+      when: vllm_enabled | bool
+
+    - name: Update Ollama Models
+      ansible.builtin.uri:
+        url: "http://localhost:{{ ollama_port }}/api/pull"
+        method: POST
+        body_format: json
+        body:
+          name: "{{ item }}"
+          stream: false
+        timeout: 3600
+        status_code: 200
+      loop: "{{ ollama_models }}"
+      tags: models
+
+    - name: Update Summary
+      ansible.builtin.debug:
+        msg:
+          - "════════════════════════════════════════════════════"
+          - "  Update abgeschlossen!"
+          - "  Open WebUI: http://localhost:{{ open_webui_port }}"
+          - "  Ollama API: http://localhost:{{ ollama_port }}/v1"
+          - "{% if vllm_enabled | bool %}  vLLM API:   http://localhost:{{ vllm_port }}/v1{% endif %}"
+          - "════════════════════════════════════════════════════"

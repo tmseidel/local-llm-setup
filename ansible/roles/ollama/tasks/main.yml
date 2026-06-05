@@ -1,0 +1,120 @@
+---
+# ============================================================
+#  Rolle: ollama — Haupttasks
+#  Installiert und konfiguriert Ollama als systemd-Dienst
+# ============================================================
+
+- name: Prüfen ob Ollama bereits installiert ist
+  ansible.builtin.stat:
+    path: /usr/local/bin/ollama
+  register: ollama_binary
+
+- name: Ollama installieren
+  when: not ollama_binary.stat.exists
+  block:
+    - name: Ollama-Installationsskript herunterladen
+      ansible.builtin.get_url:
+        url: https://ollama.com/install.sh
+        dest: /tmp/ollama_install.sh
+        mode: '0755'
+
+    - name: Ollama installieren (offizielle Methode)
+      ansible.builtin.command:
+        cmd: /tmp/ollama_install.sh
+      environment: "{{ {} if ollama_version == 'latest' else {'OLLAMA_VERSION': ollama_version} }}"
+      register: ollama_install_result
+      changed_when: true
+
+    - name: Installationsskript aufräumen
+      ansible.builtin.file:
+        path: /tmp/ollama_install.sh
+        state: absent
+
+- name: Aktuelle Ollama-Version ermitteln
+  ansible.builtin.command: ollama --version
+  register: ollama_version_check
+  changed_when: false
+  failed_when: false
+
+- name: Ollama-Version anzeigen
+  ansible.builtin.debug:
+    msg: "Ollama Version: {{ ollama_version_check.stdout }}"
+
+- name: Ollama systemd-Service-Override-Verzeichnis erstellen
+  ansible.builtin.file:
+    path: /etc/systemd/system/ollama.service.d
+    state: directory
+    mode: '0755'
+
+- name: Ollama systemd-Override konfigurieren
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/ollama.service.d/override.conf
+    content: |
+      [Service]
+      # Auf allen Interfaces lauschen (LAN-Zugriff)
+      Environment="OLLAMA_HOST={{ ollama_host }}:{{ ollama_port }}"
+
+      # Standard-Kontextlänge (korrekter Variablenname; OLLAMA_NUM_CTX
+      # existiert nicht). Ollama verwaltet den VRAM selbst — eine
+      # OLLAMA_GPU_MEMORY_FRACTION gibt es nicht.
+      Environment="OLLAMA_CONTEXT_LENGTH={{ ollama_num_ctx }}"
+
+      # Parallele Anfragen (für Agenten sinnvoll)
+      Environment="OLLAMA_NUM_PARALLEL=2"
+
+      # Wie lange ein Modell im VRAM bleibt (0 = nie entladen)
+      Environment="OLLAMA_KEEP_ALIVE=30m"
+
+      # Logs verbessern
+      Environment="OLLAMA_DEBUG=false"
+    mode: '0644'
+  notify: Ollama neu starten
+
+- name: systemd neu laden
+  ansible.builtin.systemd:
+    daemon_reload: true
+
+# ── Mutual Exclusion ───────────────────────────────────────
+# Nur EINE Engine darf laufen. Wenn Ollama aktiv ist, vLLM stoppen,
+# damit Ollama die vollen 32 GB VRAM bekommt.
+- name: vLLM stoppen+deaktivieren (Ollama ist die aktive Engine)
+  ansible.builtin.systemd:
+    name: vllm
+    state: stopped
+    enabled: false
+  when: inference_engine == 'ollama'
+  failed_when: false
+
+- name: Ollama-Dienst-Status setzen (je nach inference_engine)
+  ansible.builtin.systemd:
+    name: ollama
+    state: "{{ 'started' if inference_engine == 'ollama' else 'stopped' }}"
+    enabled: "{{ inference_engine == 'ollama' }}"
+
+- name: Warten bis Ollama-API erreichbar ist
+  ansible.builtin.uri:
+    url: "http://localhost:{{ ollama_port }}/api/tags"
+    method: GET
+    status_code: 200
+  register: ollama_health
+  until: ollama_health.status == 200
+  retries: 30
+  delay: 5
+  when: inference_engine == 'ollama'
+
+- name: Firewall-Regel für Ollama-API (wenn ufw aktiv)
+  community.general.ufw:
+    rule: allow
+    port: "{{ ollama_port }}"
+    proto: tcp
+    comment: "Ollama LLM API"
+  failed_when: false
+
+- name: Firewall-Regel für Open WebUI (wenn ufw aktiv)
+  community.general.ufw:
+    rule: allow
+    port: "{{ open_webui_port }}"
+    proto: tcp
+    comment: "Open WebUI"
+  failed_when: false
+

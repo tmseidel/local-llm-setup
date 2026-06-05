@@ -1,0 +1,89 @@
+---
+# ============================================================
+#  vLLM Rolle — Standardwerte
+#  Überschreiben in group_vars/all.yml
+# ============================================================
+
+# Aktivierungs-Flag — vLLM ist optional
+vllm_enabled: true
+
+# Python-Umgebung
+vllm_install_dir: /opt/vllm
+vllm_venv_dir: /opt/vllm/env
+vllm_log_dir: /var/log/vllm
+# Login-User (z.B. tom), NICHT ansible_user_id — letzteres ist unter
+# become: true == root und würde den Dienst als root laufen lassen.
+vllm_user: "{{ ansible_user }}"
+
+# Server-Konfiguration
+vllm_host: "0.0.0.0"
+vllm_port: 8001            # Kein Konflikt mit Ollama auf 11434
+
+# Modell — AWQ INT4 für optimale tok/s pro VRAM-GB.
+# Reale Alternativen, die mit TP=2 in 2×16 GB passen:
+#   Qwen/Qwen3-32B-AWQ                  (AWQ INT4, ~19 GB — Default)
+#   Qwen/Qwen2.5-Coder-32B-Instruct-AWQ (AWQ INT4, ~19 GB — Coding)
+#   Qwen/Qwen3-14B-AWQ                  (AWQ INT4, ~10 GB — schneller)
+vllm_model: "Qwen/Qwen3-32B-AWQ"
+
+# Blackwell (sm_120): AWQ über den Marlin-Kernel.
+vllm_quantization: "awq_marlin"   # awq_marlin | gptq_marlin | fp8 | none
+
+# Attention-Backend (Blackwell-tauglich). FLASH_ATTN ist auf sm_120 defekt.
+vllm_attention_backend: "TRITON_ATTN"
+
+# Reasoning-Parser: trennt <think>…</think> aus Qwen3 in ein eigenes Feld
+# (`reasoning_content`); `content` bleibt sauber. Leer = aus.
+vllm_reasoning_parser: "qwen3"
+
+# Tool-/Function-Calling (OpenAI-kompatibel) aktivieren.
+vllm_enable_tool_calling: true
+# Parser MUSS zum Modell-Tool-Format passen:
+#   hermes        → Qwen3 (dense/instruct, z.B. Qwen3-32B), Qwen2.5, QwQ
+#   qwen3_coder   → NUR Qwen3-Coder-Modelle (anderes XML-Format)
+# Falscher Parser = Tool-Calls werden nicht als `tool_calls` erkannt.
+vllm_tool_call_parser: "hermes"
+
+# CUDA-Graphs deaktivieren (stabil auf früher Blackwell)
+vllm_enforce_eager: false
+
+# Kontext & Speicher — eine Engine zur Zeit, daher volle GPU nutzbar
+vllm_max_model_len: 65536
+vllm_gpu_memory_utilization: "0.92"
+vllm_max_num_seqs: 32      # Maximale parallele Sequences (gut für Agenten)
+
+# KV-Cache-Quantisierung. fp8 halbiert den KV-VRAM-Bedarf (2→1 Byte/Elem)
+# → ~doppelte Kontextlänge bei nahezu identischer Qualität. Auf Blackwell nativ.
+# "auto" = fp16 (kein Flag gesetzt).
+vllm_kv_cache_dtype: "fp8"
+
+# RoPE-Scaling (YaRN), um über die native Kontextlänge (Qwen3 = 32768) hinaus
+# zu gehen. Für 64K: factor 2.0 (32768×2=65536). Leer = aus (native Länge).
+# Statischer Faktor verschlechtert kurze Kontexte leicht — nur so groß wie nötig.
+vllm_rope_scaling: '{"rope_type":"yarn","factor":2.0,"original_max_position_embeddings":32768}'
+
+# Modellgewichte in den CPU-RAM auslagern (GiB pro GPU), um VRAM für KV-Cache
+# freizumachen. Nutzt die 64 GB RAM. ACHTUNG: Gewichte streamen pro Forward-Pass
+# über PCIe → spürbar langsamer (besonders bei Pipeline-Parallel). 0 = aus.
+vllm_cpu_offload_gb: 0
+
+# HuggingFace Cache-Verzeichnis (Modelle werden hier gespeichert)
+vllm_hf_cache_dir: /opt/vllm/hf_cache
+
+# Parallelismus über GPUs. Default = Single-GPU (beides 1).
+# Für 2 GeForce-Karten ohne NVLink/P2P ist Pipeline- besser als Tensor-Parallel
+# (siehe group_vars/all.yml). tensor*pipeline = Anzahl genutzter GPUs.
+vllm_tensor_parallel_size: 1
+vllm_pipeline_parallel_size: 2
+
+# API-Key (leer = kein Auth, für LAN-Deployment ausreichend)
+vllm_api_key: ""  # Kein Auth fuer LAN
+
+# Systemd-Dienst
+vllm_service_name: vllm
+vllm_service_restart: "on-failure"
+vllm_service_restart_sec: 10
+
+
+
+

@@ -1,0 +1,112 @@
+---
+# ============================================================
+#  Lokaler LLM Stack — Haupt-Playbook
+#  Getestet auf Ubuntu 24.04 LTS
+#
+#  Ausführen:
+#    ansible-playbook -i inventory.ini site.yml --ask-become-pass
+#
+#  Nur einzelne Rollen:
+#    ansible-playbook -i inventory.ini site.yml --tags nvidia
+#    ansible-playbook -i inventory.ini site.yml --tags ollama
+#    ansible-playbook -i inventory.ini site.yml --tags webui
+#    ansible-playbook -i inventory.ini site.yml --tags models
+#    ansible-playbook -i inventory.ini site.yml --tags vllm
+#
+#  vLLM deaktivieren:
+#    ansible-playbook -i inventory.ini site.yml -e "vllm_enabled=false"
+#
+#  Modell in vLLM wechseln (ohne Neuinstallation):
+#    ansible-playbook -i inventory.ini site.yml --tags vllm_swap \
+#      -e "vllm_model=Qwen/Qwen2.5-Coder-32B-Instruct-AWQ"
+# ============================================================
+- name: Lokaler LLM Stack einrichten
+  hosts: llm_host
+  become: true
+  gather_facts: true
+
+  pre_tasks:
+    - name: Ubuntu 24.04 voraussetzen
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == "Ubuntu"
+          - ansible_distribution_version is version("24.04", ">=")
+        fail_msg: "Dieses Playbook erfordert Ubuntu 24.04 LTS oder neuer."
+        success_msg: "Ubuntu {{ ansible_distribution_version }} erkannt — OK."
+      tags: always
+
+    - name: Paketlisten aktualisieren
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+      tags: always
+
+    - name: Basiswerkzeuge installieren
+      ansible.builtin.apt:
+        name:
+          - curl
+          - wget
+          - ca-certificates
+          - gnupg
+          - lsb-release
+          - software-properties-common
+          - python3-pip
+          - htop
+          - nvtop
+        state: present
+      tags: always
+
+  roles:
+    - role: nvidia
+      tags: nvidia
+
+    - role: docker
+      tags: docker
+
+    - role: ollama
+      tags: ollama
+
+    - role: open_webui
+      tags: webui
+
+    - role: vllm
+      tags: vllm
+
+  post_tasks:
+    - name: Ollama-Modelle herunterladen
+      ansible.builtin.include_role:
+        name: ollama
+        tasks_from: pull_models
+      tags: models
+      # Pull braucht einen laufenden Ollama-Dienst. Bei inference_engine=vllm
+      # ist Ollama gestoppt → zum Pullen vorübergehend auf 'ollama' schalten.
+      when: inference_engine == 'ollama'
+
+    - name: vLLM-Modell wechseln (nur mit Tag vllm_swap)
+      ansible.builtin.include_role:
+        name: vllm
+        tasks_from: swap_model
+      tags: vllm_swap
+      when: "'vllm_swap' in ansible_run_tags"
+
+    - name: Zusammenfassung ausgeben
+      ansible.builtin.debug:
+        # WICHTIG: Eine zusammenhängende Vorlage (Block-Scalar), KEINE Liste —
+        # in einer Liste wird jedes Element einzeln getemplatet, sodass ein
+        # if-Block sein endif im selben Element nicht findet (Template-Fehler).
+        msg: |
+          ════════════════════════════════════════════════════
+            Lokaler LLM Stack — aktive Engine: {{ inference_engine | upper }}
+          ════════════════════════════════════════════════════
+
+            🌐 Open WebUI:       http://localhost:{{ open_webui_port }}
+          {% if inference_engine == 'ollama' %}
+            🔌 Ollama REST API:  http://localhost:{{ ollama_port }}/v1
+            Modelle: {{ ollama_models | join(', ') }}
+          {% else %}
+            🚀 vLLM REST API:    http://localhost:{{ vllm_port }}/v1
+            Modell: {{ vllm_model }}  (max_model_len={{ vllm_max_model_len }})
+          {% endif %}
+            Tipp: Der erste Login in Open WebUI wird der Admin-Account.
+          ════════════════════════════════════════════════════
+      tags: always

@@ -1,0 +1,218 @@
+---
+# ============================================================
+#  Rolle: vllm — Haupttasks
+#  Installiert vLLM als OpenAI-kompatibler Inference-Server
+#  für hochparallele agentische Workloads
+# ============================================================
+
+- name: vLLM-Block (nur wenn vllm_enabled = true)
+  when: vllm_enabled | bool
+  block:
+
+    # ── Voraussetzungen ──────────────────────────────────────
+
+    - name: Python 3.11+ und Build-Deps installieren
+      ansible.builtin.apt:
+        name:
+          - python3
+          - python3-pip
+          - python3-venv
+          - python3-dev
+          - build-essential
+          - git
+        state: present
+
+    - name: Python-Version prüfen (≥ 3.9 erforderlich)
+      ansible.builtin.command: python3 --version
+      register: py_version
+      changed_when: false
+
+    - name: Python-Version anzeigen
+      ansible.builtin.debug:
+        msg: "Python: {{ py_version.stdout }}"
+
+    # ── Verzeichnisse ────────────────────────────────────────
+
+    - name: Verzeichnisse anlegen
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ vllm_user }}"
+        group: "{{ vllm_user }}"
+        mode: '0755'
+      loop:
+        - "{{ vllm_install_dir }}"
+        - "{{ vllm_hf_cache_dir }}"
+        - "{{ vllm_log_dir }}"
+
+    # venv UND Cache können einem anderen User gehören (z.B. root aus einem
+    # früheren Lauf, als vllm_user noch root war) → "Permission denied" sowohl
+    # beim pip-(de)install im venv als auch beim Schreiben in den HF-Cache.
+    # Das gesamte Install-Verzeichnis (enthält env/ und hf_cache/) rekursiv
+    # dem vLLM-User übereignen, BEVOR pip als dieser User läuft.
+    - name: vLLM-Verzeichnisse rekursiv dem vLLM-User übereignen (Permission-Fix)
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ vllm_user }}"
+        group: "{{ vllm_user }}"
+        recurse: true
+      loop:
+        - "{{ vllm_install_dir }}"   # enthält env/ und hf_cache/
+        - "{{ vllm_log_dir }}"       # alte vllm.log kann root gehören → Service-Start scheitert
+
+    # ── Python venv + vLLM ──────────────────────────────────
+
+    - name: Virtuelle Python-Umgebung erstellen
+      ansible.builtin.command:
+        cmd: python3 -m venv {{ vllm_venv_dir }}
+        creates: "{{ vllm_venv_dir }}/bin/activate"
+      become_user: "{{ vllm_user }}"
+
+    - name: pip auf neuesten Stand bringen
+      ansible.builtin.pip:
+        name:
+          - pip
+          - setuptools
+          - wheel
+        state: latest
+        virtualenv: "{{ vllm_venv_dir }}"
+      become_user: "{{ vllm_user }}"
+
+    - name: Prüfen ob vLLM bereits installiert ist
+      ansible.builtin.stat:
+        path: "{{ vllm_venv_dir }}/bin/vllm"
+      register: vllm_binary
+
+    - name: vLLM installieren (inkl. CUDA-Runtime via PyTorch)
+      ansible.builtin.pip:
+        name: "vllm"
+        state: present
+        virtualenv: "{{ vllm_venv_dir }}"
+        extra_args: "--no-cache-dir"
+      become_user: "{{ vllm_user }}"
+      when: not vllm_binary.stat.exists
+      environment:
+        PIP_TIMEOUT: "300"
+
+    - name: vLLM-Version prüfen
+      ansible.builtin.command:
+        cmd: "{{ vllm_venv_dir }}/bin/vllm --version"
+      register: vllm_version_out
+      changed_when: false
+      failed_when: false
+
+    - name: vLLM-Version anzeigen
+      ansible.builtin.debug:
+        msg: "vLLM: {{ vllm_version_out.stdout | default('Version nicht ermittelbar') }}"
+
+    # ── FlashInfer entfernen (Blackwell sm_120) ─────────────
+    # FlashInfers JIT-Kernel-Build scheitert auf sm_120
+    # ("FlashInfer requires GPUs with sm75 or higher") und reißt vLLM an
+    # mehreren Stellen ab: Sampler, Attention-Backend UND CUDA-Graph-Capture.
+    # vLLM zieht es als optionale Abhängigkeit mit — wir deinstallieren es wieder,
+    # damit vLLM sauber auf Triton-Attention + nativen Sampler zurückfällt.
+    # (VLLM_ATTENTION_BACKEND=TRITON_ATTN bleibt im Start-Skript als Absicherung.)
+    - name: FlashInfer aus dem venv entfernen (inkompatibel mit sm_120)
+      ansible.builtin.pip:
+        name:
+          - flashinfer-python
+          - flashinfer
+        state: absent
+        virtualenv: "{{ vllm_venv_dir }}"
+      become_user: "{{ vllm_user }}"
+      notify: vLLM neu starten
+
+    # ── HuggingFace CLI (für Modell-Download) ───────────────
+
+    - name: HuggingFace Hub installieren
+      ansible.builtin.pip:
+        name: "huggingface_hub[cli]"
+        state: present
+        virtualenv: "{{ vllm_venv_dir }}"
+      become_user: "{{ vllm_user }}"
+
+    # ── Start-Skript ─────────────────────────────────────────
+
+    - name: vLLM Start-Skript deployen
+      ansible.builtin.template:
+        src: vllm_start.sh.j2
+        dest: "{{ vllm_install_dir }}/start.sh"
+        owner: "{{ vllm_user }}"
+        group: "{{ vllm_user }}"
+        mode: '0755'
+      notify: vLLM neu starten
+
+    # ── systemd Service ──────────────────────────────────────
+
+    - name: systemd Service-Unit für vLLM deployen
+      ansible.builtin.template:
+        src: vllm.service.j2
+        dest: /etc/systemd/system/vllm.service
+        owner: root
+        group: root
+        mode: '0644'
+      notify:
+        - systemd neu laden
+        - vLLM neu starten
+
+    - name: systemd neu laden
+      ansible.builtin.systemd:
+        daemon_reload: true
+
+    # ── Mutual Exclusion ─────────────────────────────────────
+    # Nur EINE Engine darf laufen. Wenn vLLM aktiv ist, Ollama stoppen,
+    # damit vLLM die vollen 32 GB VRAM bekommt.
+    - name: Ollama stoppen+deaktivieren (vLLM ist die aktive Engine)
+      ansible.builtin.systemd:
+        name: ollama
+        state: stopped
+        enabled: false
+      when: inference_engine == 'vllm'
+      failed_when: false
+
+    - name: vLLM-Dienst-Status setzen (je nach inference_engine)
+      ansible.builtin.systemd:
+        name: "{{ vllm_service_name }}"
+        state: "{{ 'started' if inference_engine == 'vllm' else 'stopped' }}"
+        enabled: "{{ inference_engine == 'vllm' }}"
+
+    # ── Firewall ─────────────────────────────────────────────
+
+    - name: Firewall-Regel für vLLM (wenn ufw aktiv)
+      community.general.ufw:
+        rule: allow
+        port: "{{ vllm_port }}"
+        proto: tcp
+        comment: "vLLM Inference API"
+      failed_when: false
+
+    # ── Health-Check ─────────────────────────────────────────
+
+    - name: Warten bis vLLM API bereit ist (Modell-Laden dauert 1–3 Min.)
+      ansible.builtin.uri:
+        url: "http://localhost:{{ vllm_port }}/health"
+        method: GET
+        status_code: 200
+      register: vllm_health
+      until: vllm_health.status == 200
+      retries: 60
+      delay: 10
+      ignore_errors: true
+      when: inference_engine == 'vllm'
+
+    - name: vLLM-Status zusammenfassen
+      ansible.builtin.debug:
+        msg: >
+          {% if vllm_health.status is defined and vllm_health.status == 200 %}
+          ✓ vLLM API läuft auf http://localhost:{{ vllm_port }}/v1
+          Modell: {{ vllm_model }}
+          {% else %}
+          ⚠ vLLM antwortet noch nicht — Modell-Download läuft ggf. noch.
+          Prüfe mit: journalctl -u vllm -f
+          {% endif %}
+
+- name: Hinweis wenn vLLM deaktiviert
+  ansible.builtin.debug:
+    msg: "vLLM ist deaktiviert (vllm_enabled: false). Setze vllm_enabled: true in group_vars/all.yml um es zu installieren."
+  when: not vllm_enabled | bool

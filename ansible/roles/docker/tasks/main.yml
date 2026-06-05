@@ -1,0 +1,107 @@
+---
+# ============================================================
+#  Rolle: docker
+#  Installiert Docker CE + NVIDIA Container Runtime
+# ============================================================
+
+- name: Alte Docker-Versionen entfernen
+  ansible.builtin.apt:
+    name:
+      - docker.io
+      - docker-doc
+      - docker-compose
+      - podman-docker
+      - containerd
+      - runc
+    state: absent
+  failed_when: false
+
+- name: Docker-Architektur ermitteln
+  ansible.builtin.set_fact:
+    docker_arch: "{{ 'amd64' if ansible_architecture == 'x86_64' else 'arm64' if ansible_architecture == 'aarch64' else ansible_architecture }}"
+
+- name: Docker GPG-Schluessel einrichten
+  block:
+    - name: Keyrings-Verzeichnis erstellen
+      ansible.builtin.file:
+        path: /etc/apt/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Docker GPG-Schluessel herunterladen und konvertieren
+      ansible.builtin.shell:
+        cmd: |
+          curl -fsSL https://download.docker.com/linux/{{ ansible_distribution | lower }}/gpg | \
+          gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+        creates: /etc/apt/keyrings/docker.gpg
+
+    - name: Docker-Repository hinzufuegen
+      ansible.builtin.apt_repository:
+        repo: "deb [arch={{ docker_arch }} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/{{ ansible_distribution | lower }} {{ ansible_distribution_release }} stable"
+        state: present
+        filename: docker
+
+- name: Docker CE installieren
+  ansible.builtin.apt:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-buildx-plugin
+      - docker-compose-plugin
+    state: present
+    update_cache: true
+
+- name: Docker-Dienst aktivieren und starten
+  ansible.builtin.systemd:
+    name: docker
+    state: started
+    enabled: true
+
+- name: User zur docker-Gruppe hinzufuegen
+  ansible.builtin.user:
+    name: "{{ item }}"
+    groups: docker
+    append: true
+  loop: "{{ docker_users }}"
+
+- name: NVIDIA Container Runtime fuer Docker konfigurieren
+  ansible.builtin.command:
+    cmd: nvidia-ctk runtime configure --runtime=docker
+  register: nvidia_ctk_result
+  changed_when: "'updated' in nvidia_ctk_result.stdout or nvidia_ctk_result.rc == 0"
+  failed_when: false
+  notify: Docker neu starten
+
+- name: Docker-Daemon GPU-Konfiguration setzen
+  ansible.builtin.copy:
+    dest: /etc/docker/daemon.json
+    content: |
+      {
+        "default-runtime": "nvidia",
+        "runtimes": {
+          "nvidia": {
+            "path": "nvidia-container-runtime",
+            "runtimeArgs": []
+          }
+        },
+        "log-driver": "json-file",
+        "log-opts": {
+          "max-size": "50m",
+          "max-file": "3"
+        }
+      }
+    mode: '0644'
+    owner: root
+    group: root
+  notify: Docker neu starten
+
+- name: Docker-Status bestaetigen
+  ansible.builtin.command: docker info
+  register: docker_info
+  changed_when: false
+  failed_when: false
+
+- name: Docker-Version anzeigen
+  ansible.builtin.debug:
+    msg: "Docker laeuft: {{ 'ja' if docker_info.rc == 0 else 'FEHLER - pruefe Log' }}"

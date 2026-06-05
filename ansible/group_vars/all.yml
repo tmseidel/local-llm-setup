@@ -1,0 +1,120 @@
+---
+# ============================================================
+#  Globale Konfiguration — hier alles anpassen
+# ============================================================
+
+# --- Inferenz-Engine-Auswahl --------------------------------
+# Es läuft IMMER nur EINE Engine (sie teilen sich NICHT den VRAM).
+# Die jeweils andere wird gestoppt + deaktiviert, sodass die aktive
+# Engine die vollen 32 GB VRAM nutzen kann.
+#   "vllm"   → vLLM aktiv (parallele Agenten-Workloads, TP über beide GPUs)
+#   "ollama" → Ollama aktiv (Einzel-Requests, Web-UI, Modell-Wechsel)
+inference_engine: "vllm"
+
+# --- Ollama ---------------------------------------------------
+ollama_version: "latest"
+ollama_host: "0.0.0.0"        # Auf allen Interfaces lauschen (für LAN-Zugriff)
+ollama_port: 11434
+ollama_models:
+  - "qwen3:32b"
+  # Weitere Modelle einfach hier ergänzen (müssen in 32 GB passen):
+  # - "qwen2.5-coder:32b"   # ~20 GB, Coding
+  # - "qwen3:30b-a3b"       # MoE, schnell
+  # - "gpt-oss:20b"         # ~13 GB
+
+# Kontext-Fenstergröße (Token) → wird als OLLAMA_CONTEXT_LENGTH gesetzt.
+# Hinweis: OLLAMA_GPU_MEMORY_FRACTION existiert NICHT in Ollama und wurde
+# entfernt; Ollama verwaltet den VRAM automatisch (ggf. OLLAMA_GPU_OVERHEAD).
+ollama_num_ctx: 32768
+
+# --- Open WebUI -----------------------------------------------
+open_webui_version: "main"
+open_webui_port: 8080
+open_webui_data_dir: "/opt/open-webui/data"
+
+# --- Docker ---------------------------------------------------
+docker_users:
+  - "{{ ansible_user }}"   # Login-User (nicht root!) zur docker-Gruppe
+
+# --- vLLM (optional, für parallele Agenten-Workloads) --------
+# Auf false setzen wenn nur Ollama gewünscht wird
+vllm_enabled: true
+
+# Port: Kein Konflikt mit Ollama (11434) oder Open WebUI (8080)
+vllm_port: 8001
+
+# Modell für vLLM — AWQ INT4 (Qwen3-32B-AWQ ≈ 19 GB Gewichte).
+# Wird über BEIDE RTX 5060 Ti (2×16 GB) verteilt (Parallelismus s. unten).
+# Alternativen (alle real, passen in 32 GB):
+#   Qwen/Qwen2.5-Coder-32B-Instruct-AWQ  (~19 GB, Coding → tool_call_parser: qwen3_coder)
+#   Qwen/Qwen3-14B-AWQ                   (~10 GB, schneller; tensor=1, pipeline=1)
+vllm_model: "Qwen/Qwen3-32B-AWQ"
+
+# Blackwell (sm_120): AWQ läuft stabil mit dem Marlin-Kernel.
+vllm_quantization: "awq_marlin"   # awq_marlin | gptq_marlin | fp8 | none
+
+# Attention-Backend für Blackwell: TRITON_ATTN funktioniert out-of-the-box.
+# FLASH_ATTN ist auf sm_120 defekt (undefined symbol); FLASHINFER braucht
+# eine JIT-Toolchain (gcc, python3-dev, nvcc, ninja).
+vllm_attention_backend: "TRITON_ATTN"
+
+# CUDA-Graphs: false = aktiviert (deutlich schneller, vermeidet Triton-JIT
+# während der Inferenz). true nur als Notnagel, falls Graph-Capture auf
+# Blackwell crasht.
+vllm_enforce_eager: false
+
+# Tool-/Function-Calling (OpenAI-kompatibel).
+vllm_enable_tool_calling: true
+# Parser MUSS zum Tool-Format des Modells passen:
+#   hermes       → Qwen3 dense/instruct (Qwen3-32B), Qwen2.5, QwQ
+#   qwen3_coder  → NUR Qwen3-Coder-Modelle
+vllm_tool_call_parser: "hermes"
+
+# Reasoning-Parser für Qwen3 (<think>…</think> → reasoning_content). Leer = aus.
+vllm_reasoning_parser: "qwen3"
+
+# Kontext und Parallelität — volle GPU verfügbar (kein Co-Tenant)
+# 65536 (64K) für den Hermes-Agenten. Möglich durch fp8-KV-Cache + YaRN (unten).
+vllm_max_model_len: 65536
+vllm_gpu_memory_utilization: "0.92"
+vllm_max_num_seqs: 32             # Parallele Sequences — gut für Agenten
+
+# --- 64K-Kontext: VRAM-Hebel -------------------------------------
+# 1) fp8-KV-Cache halbiert den KV-VRAM (0.25→0.125 MiB/Token) → 64K ≈ 8 GiB
+#    KV total, mit PP=2 also ~4 GiB/GPU. DER entscheidende Hebel.
+vllm_kv_cache_dtype: "fp8"          # "auto" = fp16 (doppelter KV-Bedarf)
+
+# 2) YaRN, damit das Modell Positionen > 32768 adressieren kann (Pflicht für 64K).
+#    factor 2.0 = 32768×2 = 65536. Nur so groß wie nötig (schont kurze Kontexte).
+vllm_rope_scaling: '{"rope_type":"yarn","factor":2.0,"original_max_position_embeddings":32768}'
+
+# 3) FALLBACK, falls VRAM trotz fp8 noch knapp: Gewichte in die 64 GB RAM
+#    auslagern (GiB/GPU). Macht VRAM für KV frei, ABER Gewichte streamen pro
+#    Forward-Pass über PCIe → deutlich langsamer. Erst erhöhen, wenn nötig. 0 = aus.
+vllm_cpu_offload_gb: 0
+
+# Parallelismus über die 2 GPUs:
+# Consumer-Blackwell hat kein NVLink und PCIe-P2P ist deaktiviert → Tensor-
+# Parallelism (All-Reduce pro Layer) wäre kommunikationsgebunden und langsam.
+# Stattdessen Pipeline-Parallelism: die Layer werden auf beide Karten verteilt,
+# nur Aktivierungen queren PCIe (einmal pro Token) → deutlich schneller bei
+# niedriger Parallelität. Für hohe Concurrency Durchsatz über Microbatching.
+vllm_tensor_parallel_size: 1
+vllm_pipeline_parallel_size: 2
+
+# HuggingFace Token (optional, NUR für gated models).
+# Für öffentliche Qwen-Modelle NICHT nötig → leer lassen.
+# Für gated models: per Ansible-Vault oder -e übergeben, NIEMALS hier committen!
+vllm_hf_token: ""
+
+# --- NVIDIA ---------------------------------------------------
+# Treiber-Installationsmethode: "ubuntu-drivers" oder "manual"
+nvidia_driver_method: "ubuntu-drivers"
+# Minimale Treiber-Version — Blackwell (RTX 50xx) erfordert >= 570
+nvidia_driver_min_version: 570
+
+
+
+
+
+

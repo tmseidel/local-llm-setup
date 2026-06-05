@@ -1,0 +1,64 @@
+---
+# ============================================================
+#  Ollama: Download Models
+#  Executed as a separate task after all roles
+#  Callable separately with --tags models
+# ============================================================
+
+- name: Determine existing models
+  ansible.builtin.uri:
+    url: "http://localhost:{{ ollama_port }}/api/tags"
+    method: GET
+    return_content: true
+  register: existing_models_response
+
+- name: Extract names of existing models
+  ansible.builtin.set_fact:
+    existing_model_names: >-
+      {{ existing_models_response.json.models
+         | default([])
+         | map(attribute='name')
+         | list }}
+
+- name: Display existing models
+  ansible.builtin.debug:
+    msg: "Already loaded: {{ existing_model_names | join(', ') or 'none' }}"
+
+- name: Download models (may take several minutes)
+  ansible.builtin.uri:
+    url: "http://localhost:{{ ollama_port }}/api/pull"
+    method: POST
+    body_format: json
+    body:
+      name: "{{ item }}"
+      stream: false
+    timeout: 3600         # 1 Stunde Timeout für große Modelle
+    status_code: 200
+  loop: "{{ ollama_models }}"
+  when: item not in existing_model_names
+  register: pull_results
+
+- name: Summarize download results
+  ansible.builtin.debug:
+    msg: >
+      Modell '{{ item.item }}':
+      {{ 'skipped (already exists)' if item.skipped | default(false)
+         else ('✓ downloaded' if item.status == 200 else '✗ Error') }}
+  loop: "{{ pull_results.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: List all loaded models
+  ansible.builtin.uri:
+    url: "http://localhost:{{ ollama_port }}/api/tags"
+    method: GET
+    return_content: true
+  register: final_models
+
+- name: Display loaded models
+  ansible.builtin.debug:
+    msg: >
+      Available models:
+      {% for m in final_models.json.models | default([]) %}
+      • {{ m.name }} ({{ (m.size / 1073741824) | round(1) }} GB)
+      {% endfor %}

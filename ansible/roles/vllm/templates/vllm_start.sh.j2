@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# ============================================================
+#  vLLM Start-Skript
+#  Generiert von Ansible — nicht manuell bearbeiten.
+#  Änderungen in group_vars/all.yml vornehmen.
+# ============================================================
+set -euo pipefail
+
+# HuggingFace Cache-Verzeichnis
+export HF_HOME="{{ vllm_hf_cache_dir }}"
+export HUGGINGFACE_HUB_CACHE="{{ vllm_hf_cache_dir }}"
+{% if vllm_hf_token != "" %}
+export HF_TOKEN="{{ vllm_hf_token }}"
+export HUGGINGFACE_TOKEN="{{ vllm_hf_token }}"
+{% endif %}
+
+# Beide GPUs verwenden
+export CUDA_VISIBLE_DEVICES=0,1
+
+# GeForce-Karten haben kein funktionierendes PCIe-P2P (kein NVLink). NCCL-P2P
+# abschalten, um Hänger/Deadlocks bei Multi-GPU (Pipeline-/Tensor-Parallel)
+# zu vermeiden — Transfers laufen dann über Shared Memory / Host.
+export NCCL_P2P_DISABLE=1
+
+# Attention-Backend für Blackwell (sm_120).
+# FLASH_ATTN ist auf sm_120 defekt (undefined symbol); TRITON_ATTN läuft
+# out-of-the-box, FLASHINFER benötigt eine JIT-Toolchain.
+export VLLM_ATTENTION_BACKEND={{ vllm_attention_backend }}
+
+# FlashInfer-Sampler deaktivieren. vLLM zieht ihn automatisch, sobald das
+# flashinfer-Paket installiert ist; dessen JIT-Arch-Check scheitert aber auf
+# sm_120 mit "FlashInfer requires GPUs with sm75 or higher" und bricht schon
+# beim Memory-Profiling ab. Stattdessen PyTorch-nativer Top-k/Top-p-Sampler.
+export VLLM_USE_FLASHINFER_SAMPLER=0
+
+# vLLM Umgebung aktivieren
+source {{ vllm_venv_dir }}/bin/activate
+
+exec {{ vllm_venv_dir }}/bin/vllm serve "{{ vllm_model }}" \
+  --host "{{ vllm_host }}" \
+  --port {{ vllm_port }} \
+{% if vllm_enable_tool_calling | bool %}
+  --enable-auto-tool-choice \
+  --tool-call-parser {{ vllm_tool_call_parser }} \
+{% endif %}
+{% if vllm_reasoning_parser != "" %}
+  --reasoning-parser {{ vllm_reasoning_parser }} \
+{% endif %}
+{% if vllm_quantization != "none" %}
+  --quantization {{ vllm_quantization }} \
+{% endif %}
+  --gpu-memory-utilization {{ vllm_gpu_memory_utilization }} \
+  --max-model-len {{ vllm_max_model_len }} \
+{% if vllm_kv_cache_dtype != "auto" and vllm_kv_cache_dtype != "" %}
+  --kv-cache-dtype {{ vllm_kv_cache_dtype }} \
+{% endif %}
+{% if vllm_rope_scaling != "" %}
+  --hf-overrides '{"rope_scaling": {{ vllm_rope_scaling }}}' \
+{% endif %}
+{% if vllm_cpu_offload_gb | int > 0 %}
+  --cpu-offload-gb {{ vllm_cpu_offload_gb }} \
+{% endif %}
+  --max-num-seqs {{ vllm_max_num_seqs }} \
+  --tensor-parallel-size {{ vllm_tensor_parallel_size }} \
+{% if vllm_pipeline_parallel_size | int > 1 %}
+  --pipeline-parallel-size {{ vllm_pipeline_parallel_size }} \
+{% endif %}
+  --served-model-name "{{ vllm_model.split('/')[-1] }}" \
+{% if vllm_enforce_eager | bool %}
+  --enforce-eager \
+{% endif %}
+{% if vllm_api_key != "" %}
+  --api-key "{{ vllm_api_key }}" \
+{% endif %}

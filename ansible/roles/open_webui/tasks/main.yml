@@ -1,0 +1,92 @@
+---
+# ============================================================
+#  Rolle: open_webui
+#  Deployt Open WebUI als Docker-Container mit systemd-Unit
+# ============================================================
+
+- name: Datenverzeichnis für Open WebUI anlegen
+  ansible.builtin.file:
+    path: "{{ open_webui_data_dir }}"
+    state: directory
+    mode: '0755'
+    owner: root
+    group: root
+
+- name: Neuestes Open WebUI Image herunterladen
+  ansible.builtin.command:
+    cmd: "docker pull ghcr.io/open-webui/open-webui:{{ open_webui_version }}"
+  register: docker_pull
+  changed_when: "'Status: Downloaded newer image' in docker_pull.stdout"
+
+# Container IMMER frisch erstellen. Macht den Task idempotent und stellt sicher,
+# dass geänderte ENV (z.B. Engine-Wechsel ollama↔vllm) übernommen werden — und
+# dass ein vorhandener, aber GESTOPPTER Container nicht hängenbleibt (docker
+# inspect war hier irreführend: rc 0 auch für exited/dead Container).
+# Die Daten liegen im gemounteten Volume und überleben das Neuanlegen.
+- name: Vorhandenen Open WebUI Container entfernen (falls vorhanden)
+  ansible.builtin.command: docker rm -f open-webui
+  register: webui_rm
+  changed_when: webui_rm.rc == 0
+  failed_when: false
+
+- name: Open WebUI Docker-Container starten
+  ansible.builtin.command:
+    cmd: >
+      docker run -d
+      --name open-webui
+      --restart always
+      -p {{ open_webui_port }}:8080
+      -v {{ open_webui_data_dir }}:/app/backend/data
+      --add-host=host.docker.internal:host-gateway
+      {% if inference_engine == 'ollama' %}-e OLLAMA_BASE_URL=http://host.docker.internal:{{ ollama_port }}{% else %}-e ENABLE_OLLAMA_API=false -e OPENAI_API_BASE_URL=http://host.docker.internal:{{ vllm_port }}/v1 -e OPENAI_API_KEY={{ (vllm_api_key | default('')) or 'dummy' }}{% endif %}
+      -e ENABLE_SIGNUP=true
+      -e DEFAULT_USER_ROLE=user
+      -e WEBUI_AUTH=true
+      ghcr.io/open-webui/open-webui:{{ open_webui_version }}
+  register: webui_start
+
+- name: Warten bis Open WebUI erreichbar ist
+  ansible.builtin.uri:
+    url: "http://localhost:{{ open_webui_port }}"
+    method: GET
+    status_code: [200, 302]
+  register: webui_health
+  until: webui_health.status in [200, 302]
+  retries: 30
+  delay: 5
+
+- name: systemd-Unit für Open WebUI erstellen (Auto-Start nach Reboot)
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/open-webui.service
+    content: |
+      [Unit]
+      Description=Open WebUI (Lokales LLM Web-Interface)
+      # Nur an Docker koppeln — NICHT an ollama.service. Die aktive Engine
+      # (ollama ODER vllm) wird über HTTP erreicht; bei inference_engine=vllm
+      # ist ollama gestoppt+deaktiviert, ein Requires=ollama würde es hochziehen
+      # bzw. den WebUI-Start blockieren.
+      Requires=docker.service
+      After=docker.service
+
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/usr/bin/docker start open-webui
+      ExecStop=/usr/bin/docker stop open-webui
+      TimeoutStartSec=60
+
+      [Install]
+      WantedBy=multi-user.target
+    mode: '0644'
+  notify: Open WebUI systemd aktivieren
+
+- name: Open WebUI systemd-Dienst aktivieren
+  ansible.builtin.systemd:
+    name: open-webui
+    enabled: true
+    daemon_reload: true
+
+- name: Open WebUI Erreichbarkeit bestätigen
+  ansible.builtin.debug:
+    msg: "✓ Open WebUI erreichbar unter http://localhost:{{ open_webui_port }}"
+

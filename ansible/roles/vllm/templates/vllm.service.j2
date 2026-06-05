@@ -1,0 +1,42 @@
+[Unit]
+Description=vLLM — OpenAI-kompatibler LLM Inference Server ({{ vllm_model }})
+Documentation=https://docs.vllm.ai
+Wants=network-online.target
+After=network-online.target
+# Erst starten wenn NVIDIA-Treiber geladen ist
+After=nvidia-persistenced.service
+
+[Service]
+Type=simple
+User={{ vllm_user }}
+Group={{ vllm_user }}
+WorkingDirectory={{ vllm_install_dir }}
+ExecStart={{ vllm_install_dir }}/start.sh
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Logging
+StandardOutput=append:{{ vllm_log_dir }}/vllm.log
+StandardError=append:{{ vllm_log_dir }}/vllm.log
+
+# Neustart-Verhalten
+Restart={{ vllm_service_restart }}
+RestartSec={{ vllm_service_restart_sec }}
+
+# Ressourcen-Limits
+# OOM-Killer soll andere Prozesse bevorzugen, nicht vLLM
+OOMScoreAdjust=-100
+# vLLM braucht viel Arbeitsspeicher für GPU-Transfers
+LimitMEMLOCK=infinity
+LimitNOFILE=65536
+
+# GPU-Zugriff sicherstellen
+Environment=CUDA_VISIBLE_DEVICES=0,1
+Environment=HF_HOME={{ vllm_hf_cache_dir }}
+
+# Timeout: vLLM-Start dauert 1–3 Minuten wegen Modell-Laden
+TimeoutStartSec=300
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+

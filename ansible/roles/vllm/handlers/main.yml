@@ -1,0 +1,11 @@
+---
+- name: vLLM neu starten
+  ansible.builtin.systemd:
+    name: "{{ vllm_service_name }}"
+    state: restarted
+    daemon_reload: true
+  when: inference_engine == 'vllm'
+
+- name: systemd neu laden
+  ansible.builtin.systemd:
+    daemon_reload: true

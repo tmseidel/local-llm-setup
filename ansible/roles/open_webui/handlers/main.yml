@@ -1,0 +1,6 @@
+---
+- name: Open WebUI systemd aktivieren
+  ansible.builtin.systemd:
+    name: open-webui
+    enabled: true
+    daemon_reload: true

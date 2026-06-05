@@ -1,0 +1,133 @@
+---
+# ============================================================
+# Role: nvidia
+# Installs NVIDIA drivers and CUDA Toolkit
+# ============================================================
+
+- name: Check if NVIDIA GPU is present
+  ansible.builtin.shell:
+    cmd: lspci | grep -i nvidia
+  register: nvidia_gpu_check
+  failed_when: false
+  changed_when: false
+
+- name: Warn if no NVIDIA GPU detected
+  ansible.builtin.debug:
+    msg: "⚠️ No NVIDIA GPU detected — skipping driver installation."
+  when: nvidia_gpu_check.rc != 0
+
+- name: NVIDIA driver block (only if GPU is present)
+  when: nvidia_gpu_check.rc == 0
+  block:
+    - name: Check nvidia-smi (drivers already installed?)
+      ansible.builtin.command: nvidia-smi
+      register: nvidia_smi_check
+      failed_when: false
+      changed_when: false
+
+    - name: Determine current driver version
+      ansible.builtin.shell:
+        cmd: "nvidia-smi --query-gpu=driver_version --format=csv,noheader 2>/dev/null | head -1 | cut -d'.' -f1"
+      register: current_driver_version
+      failed_when: false
+      changed_when: false
+      when: nvidia_smi_check.rc == 0
+
+    - name: Check driver version against Blackwell minimum
+      ansible.builtin.debug:
+        msg: >-
+          ⚠️ NVIDIA driver {{ current_driver_version.stdout }} < {{ nvidia_driver_min_version }}.
+          Blackwell (RTX 50xx, sm_120) requires at least driver
+          {{ nvidia_driver_min_version }}. Please update, otherwise neither vLLM
+          nor Ollama will start on the GPU.
+      when:
+        - nvidia_smi_check.rc == 0
+        - current_driver_version.stdout is defined
+        - current_driver_version.stdout | length > 0
+        - current_driver_version.stdout | int < nvidia_driver_min_version | int
+
+    - name: Install NVIDIA driver (ubuntu-drivers method)
+      when:
+        - nvidia_driver_method == "ubuntu-drivers"
+        - nvidia_smi_check.rc != 0
+      block:
+        - name: Install ubuntu-drivers-common
+          ansible.builtin.apt:
+            name: ubuntu-drivers-common
+            state: present
+
+        - name: Determine recommended driver
+          ansible.builtin.command: ubuntu-drivers devices
+          register: ubuntu_drivers_output
+          changed_when: false
+
+        - name: Display driver recommendation
+          ansible.builtin.debug:
+            var: ubuntu_drivers_output.stdout_lines
+
+        - name: Install recommended NVIDIA driver
+          ansible.builtin.command: ubuntu-drivers install
+          register: driver_install
+          changed_when: "'installed' in driver_install.stdout"
+
+    - name: Install CUDA Toolkit
+      ansible.builtin.apt:
+        name:
+          - nvidia-cuda-toolkit
+          - nvidia-cuda-dev
+        state: present
+      when: nvidia_smi_check.rc == 0 or nvidia_driver_method == "ubuntu-drivers"
+
+    - name: Add NVIDIA Container Toolkit Repository
+      block:
+        - name: Download NVIDIA GPG key
+          ansible.builtin.get_url:
+            url: "https://nvidia.github.io/libnvidia-container/gpgkey"
+            dest: /tmp/nvidia-container-toolkit.gpg
+            mode: '0644'
+
+        - name: De-armor GPG key
+          ansible.builtin.command:
+            cmd: gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg /tmp/nvidia-container-toolkit.gpg
+            creates: /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+
+        - name: Add NVIDIA Container Toolkit Repository
+          ansible.builtin.shell:
+            cmd: |- 
+              curl -s -L https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list | \
+              sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+              tee /etc/apt/sources.list.d/nvidia-container-toolkit.list
+            creates: /etc/apt/sources.list.d/nvidia-container-toolkit.list
+
+        - name: Update package lists with NVIDIA repo
+          ansible.builtin.apt:
+            update_cache: true
+
+        - name: Install NVIDIA Container Toolkit
+          ansible.builtin.apt:
+            name: nvidia-container-toolkit
+            state: present
+
+    - name: Test nvidia-smi after installation
+      ansible.builtin.command: nvidia-smi
+      register: nvidia_smi_final
+      changed_when: false
+      failed_when: false
+
+    - name: Display GPU information
+      ansible.builtin.debug:
+        msg: "{{ nvidia_smi_final.stdout_lines }}"
+      when: nvidia_smi_final.rc == 0
+
+    - name: Check if reboot is required
+      ansible.builtin.stat:
+        path: /var/run/reboot-required
+      register: reboot_required
+
+    - name: Output reboot warning
+      ansible.builtin.debug:
+        msg: >-
+          ⚠️ REBOOT REQUIRED after driver installation.
+          Run 'sudo reboot' and re-run the playbook afterward
+          with --skip-tags nvidia
+      when: reboot_required.stat.exists

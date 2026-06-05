@@ -1,0 +1,48 @@
+---
+# ============================================================
+#  vLLM: Update-Task
+#  Wird von update.yml aufgerufen
+# ============================================================
+
+- name: vLLM aktualisieren
+  when: vllm_enabled | bool
+  block:
+    - name: vLLM auf neueste Version updaten
+      ansible.builtin.pip:
+        name: "vllm"
+        state: latest
+        virtualenv: "{{ vllm_venv_dir }}"
+        extra_args: "--no-cache-dir"
+      become_user: "{{ vllm_user }}"
+      register: vllm_update
+      environment:
+        PIP_TIMEOUT: "300"
+
+    # vLLM zieht flashinfer als Abhängigkeit mit — auf sm_120 unbrauchbar
+    # und absturzverursachend, daher nach jedem Update wieder entfernen.
+    - name: FlashInfer nach Update entfernen (inkompatibel mit sm_120)
+      ansible.builtin.pip:
+        name:
+          - flashinfer-python
+          - flashinfer
+        state: absent
+        virtualenv: "{{ vllm_venv_dir }}"
+      become_user: "{{ vllm_user }}"
+      register: flashinfer_removed
+
+    - name: vLLM nach Update neu starten
+      ansible.builtin.systemd:
+        name: "{{ vllm_service_name }}"
+        state: restarted
+      when: vllm_update.changed or flashinfer_removed.changed
+
+    - name: Neue vLLM-Version anzeigen
+      ansible.builtin.command:
+        cmd: "{{ vllm_venv_dir }}/bin/vllm --version"
+      register: new_version
+      changed_when: false
+      failed_when: false
+
+    - name: Update-Ergebnis
+      ansible.builtin.debug:
+        msg: "vLLM nach Update: {{ new_version.stdout | default('unbekannt') }}"
