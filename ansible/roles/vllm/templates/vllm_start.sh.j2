@@ -39,6 +39,12 @@ source {{ vllm_venv_dir }}/bin/activate
 exec {{ vllm_venv_dir }}/bin/vllm serve "{{ vllm_model }}" \
   --host "{{ vllm_host }}" \
   --port {{ vllm_port }} \
+{% if vllm_enable_prefix_caching | default(false) | bool %}
+  --enable-prefix-caching \
+{% endif %}
+{% if vllm_enable_chunked_prefill | default(true) | bool %}
+  --enable-chunked-prefill \
+{% endif %}
 {% if vllm_enable_tool_calling | bool %}
   --enable-auto-tool-choice \
   --tool-call-parser {{ vllm_tool_call_parser }} \

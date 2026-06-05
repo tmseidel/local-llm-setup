@@ -75,9 +75,20 @@ vllm_reasoning_parser: "qwen3"
 
 # Kontext und Parallelität — volle GPU verfügbar (kein Co-Tenant)
 # 65536 (64K) für den Hermes-Agenten. Möglich durch fp8-KV-Cache + YaRN (unten).
+# Falls 64K nicht gebraucht wird: 32768 setzen + vllm_rope_scaling leer → spart
+# ~4 GB KV-VRAM, mehr Platz für Batching.
 vllm_max_model_len: 65536
-vllm_gpu_memory_utilization: "0.92"
+vllm_gpu_memory_utilization: "0.95"   # 0.95 sicher (kein Co-Tenant, Ollama aus)
 vllm_max_num_seqs: 32             # Parallele Sequences — gut für Agenten
+
+# Prefix Caching — KV-Cache für wiederkehrende Prompt-Präfixe (System-Prompts,
+# Tool-Definitionen) wiederverwenden. Kostenlos 50-80% TTFT-Verbesserung bei
+# Agent-Workloads mit wiederholten Präfixen.
+vllm_enable_prefix_caching: true
+
+# Prometheus-Metriken sind in modernen vLLM-Versionen standardmäßig aktiv.
+# Abrufbar unter: curl http://localhost:8001/metrics
+# Zum Deaktivieren: --disable-metrics in vllm_start.sh.j2 ergänzen.
 
 # --- 64K-Kontext: VRAM-Hebel -------------------------------------
 # 1) fp8-KV-Cache halbiert den KV-VRAM (0.25→0.125 MiB/Token) → 64K ≈ 8 GiB
@@ -94,13 +105,15 @@ vllm_rope_scaling: '{"rope_type":"yarn","factor":2.0,"original_max_position_embe
 vllm_cpu_offload_gb: 0
 
 # Parallelismus über die 2 GPUs:
-# Consumer-Blackwell hat kein NVLink und PCIe-P2P ist deaktiviert → Tensor-
-# Parallelism (All-Reduce pro Layer) wäre kommunikationsgebunden und langsam.
-# Stattdessen Pipeline-Parallelism: die Layer werden auf beide Karten verteilt,
-# nur Aktivierungen queren PCIe (einmal pro Token) → deutlich schneller bei
-# niedriger Parallelität. Für hohe Concurrency Durchsatz über Microbatching.
-vllm_tensor_parallel_size: 1
-vllm_pipeline_parallel_size: 2
+# TP=2 vs PP=2 Trade-off (beide ~20 tok/s Basis auf diesem Hardware):
+#   PP=2: Pipeline-Bubble → bei 1-4 Requests eine GPU ~50% idle.
+#         Skaliert gut bei hoher Concurrency (8+).
+#   TP=2: All-Reduce pro Layer über PCIe, aber beide GPUs immer busy.
+#         Besser bei niedriger Concurrency (typischer Agent-Workload).
+# Empfehlung für Agent-Workloads: TP=2 testen. Falls bei 8+ parallelen
+# Requests PP=2 besser ist, zurückwechseln.
+vllm_tensor_parallel_size: 2
+vllm_pipeline_parallel_size: 1
 
 # HuggingFace Token (optional, NUR für gated models).
 # Für öffentliche Qwen-Modelle NICHT nötig → leer lassen.

@@ -49,13 +49,27 @@ vllm_enforce_eager: false
 
 # Kontext & Speicher — eine Engine zur Zeit, daher volle GPU nutzbar
 vllm_max_model_len: 65536
-vllm_gpu_memory_utilization: "0.92"
+vllm_gpu_memory_utilization: "0.95"
 vllm_max_num_seqs: 32      # Maximale parallele Sequences (gut für Agenten)
 
 # KV-Cache-Quantisierung. fp8 halbiert den KV-VRAM-Bedarf (2→1 Byte/Elem)
 # → ~doppelte Kontextlänge bei nahezu identischer Qualität. Auf Blackwell nativ.
 # "auto" = fp16 (kein Flag gesetzt).
 vllm_kv_cache_dtype: "fp8"
+
+# Prefix Caching: KV-Cache-Blöcke für wiederkehrende Prompt-Präfixe behalten.
+# System-Prompts, Tool-Definitionen etc. werden nur einmal berechnet → schneller
+# TTFT bei Agent-Workloads. Kein Nachteil.
+vllm_enable_prefix_caching: true
+
+# Chunked Prefill: Lange Prefills in Chunks aufteilen, damit Decode-Requests
+# nicht blockiert werden. V1-Engine hat es per Default an; explizit setzen
+# zur Dokumentation.
+vllm_enable_chunked_prefill: true
+
+# Prometheus-Metriken sind in modernen vLLM-Versionen (V1-Engine) standardmäßig
+# aktiviert — kein Flag nötig. Abrufbar unter: curl http://localhost:8001/metrics
+# Zum Deaktivieren: --disable-metrics in vllm_start.sh.j2 ergänzen.
 
 # RoPE-Scaling (YaRN), um über die native Kontextlänge (Qwen3 = 32768) hinaus
 # zu gehen. Für 64K: factor 2.0 (32768×2=65536). Leer = aus (native Länge).
@@ -70,11 +84,12 @@ vllm_cpu_offload_gb: 0
 # HuggingFace Cache-Verzeichnis (Modelle werden hier gespeichert)
 vllm_hf_cache_dir: /opt/vllm/hf_cache
 
-# Parallelismus über GPUs. Default = Single-GPU (beides 1).
-# Für 2 GeForce-Karten ohne NVLink/P2P ist Pipeline- besser als Tensor-Parallel
-# (siehe group_vars/all.yml). tensor*pipeline = Anzahl genutzter GPUs.
-vllm_tensor_parallel_size: 1
-vllm_pipeline_parallel_size: 2
+# Parallelismus über GPUs. Default = TP=2 für 2× GeForce ohne NVLink.
+# TP=2 besser bei niedriger Concurrency (Agent-Workloads, 1-4 Requests).
+# PP=2 besser bei hoher Concurrency (8+ Requests) durch Microbatching.
+# tensor*pipeline = Anzahl genutzter GPUs.
+vllm_tensor_parallel_size: 2
+vllm_pipeline_parallel_size: 1
 
 # API-Key (leer = kein Auth, für LAN-Deployment ausreichend)
 vllm_api_key: ""  # Kein Auth fuer LAN
