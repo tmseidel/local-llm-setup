@@ -67,6 +67,9 @@ exec {{ vllm_venv_dir }}/bin/vllm serve "{{ vllm_model }}" \
   --cpu-offload-gb {{ vllm_cpu_offload_gb }} \
 {% endif %}
   --max-num-seqs {{ vllm_max_num_seqs }} \
+{% if vllm_max_num_batched_tokens is defined %}
+  --max-num-batched-tokens {{ vllm_max_num_batched_tokens }} \
+{% endif %}
   --tensor-parallel-size {{ vllm_tensor_parallel_size }} \
 {% if vllm_pipeline_parallel_size | int > 1 %}
   --pipeline-parallel-size {{ vllm_pipeline_parallel_size }} \

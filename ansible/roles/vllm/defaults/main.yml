@@ -44,13 +44,16 @@ vllm_enable_tool_calling: true
 # Falscher Parser = Tool-Calls werden nicht als `tool_calls` erkannt.
 vllm_tool_call_parser: "hermes"
 
-# CUDA-Graphs deaktivieren (stabil auf früher Blackwell)
-vllm_enforce_eager: false
+# CUDA-Graphs deaktivieren — MoE + TP über PCIe (kein NVLink/P2P) führt mit
+# CUDA Graphs zu Deadlocks in der Shared-Memory-Kommunikation zwischen Workern
+# (sample_tokens Timeout nach langer Generierung).
+vllm_enforce_eager: true
 
 # Kontext & Speicher — eine Engine zur Zeit, daher volle GPU nutzbar
 vllm_max_model_len: 65536
 vllm_gpu_memory_utilization: "0.95"
 vllm_max_num_seqs: 32      # Maximale parallele Sequences (gut für Agenten)
+vllm_max_num_batched_tokens: 4096  # Muss >= Mamba block_size (Qwen3.6: 2096)
 
 # KV-Cache-Quantisierung. fp8 halbiert den KV-VRAM-Bedarf (2→1 Byte/Elem)
 # → ~doppelte Kontextlänge bei nahezu identischer Qualität. Auf Blackwell nativ.

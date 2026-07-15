@@ -46,7 +46,7 @@ cd ansible
 
 # 3. Choose active engine in group_vars/all.yml (inference_engine: vllm | ollama)
 #    and install the stack
-ansible-playbook -i inventory.ini site.yml --ask-become-pass
+ansible-playbook -i inventory.ini site.yml --ask-pass --ask-become-pass
 
 # 4. Test after completion
 ansible-playbook -i inventory.ini test.yml
