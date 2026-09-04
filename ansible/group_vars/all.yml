@@ -11,16 +11,24 @@
 #   "ollama" → Ollama aktiv (Einzel-Requests, Web-UI, Modell-Wechsel)
 inference_engine: "vllm"
 
+# ZIELHARDWARE: 2× RTX 5060 Ti 16 GB (Blackwell sm_120, 32 GB VRAM gesamt)
+#              Ryzen 9 9950X (16 Cores), 64 GB DDR5
+# AKTIVES MODELL: Qwen3.8-27B — dense 27B VLM, hybride Attention
+#   (48× GatedDeltaNet linear + 16× Full-Attention), 262K nativer Kontext,
+#   eingebauter MTP-Draft-Head (derzeit aus, zugunsten KV-Pool).
+#   Checkpoint: philbert440/Qwen3.8-27B-W4A16-AWQ (~19.5 GB INT4).
+#   Erfordert vLLM >= 0.17.
+
 # --- Ollama ---------------------------------------------------
 ollama_version: "latest"
 ollama_host: "0.0.0.0"        # Auf allen Interfaces lauschen (für LAN-Zugriff)
 ollama_port: 11434
 ollama_models:
-  - "qwen3.6:35b-a3b"
+  - "qwen3.8:27b"
   # Weitere Modelle einfach hier ergänzen (müssen in 32 GB passen):
-  # - "qwen3.6:27b"         # Dense, Multimodal
-  # - "qwen3.5:35b-a3b"    # MoE, Vorgänger von 3.6
-  # - "qwen3:30b-a3b"      # MoE, schnell (älter)
+  # - "qwen3.6:35b-a3b"      # MoE, Vorgänger
+  # - "qwen3.6:27b"          # Dense, Vorgänger
+  # - "qwen3:30b-a3b"        # MoE, schnell (älter)
 
 # Kontext-Fenstergröße (Token) → wird als OLLAMA_CONTEXT_LENGTH gesetzt.
 # Hinweis: OLLAMA_GPU_MEMORY_FRACTION existiert NICHT in Ollama und wurde
@@ -43,18 +51,22 @@ vllm_enabled: true
 # Port: Kein Konflikt mit Ollama (11434) oder Open WebUI (8080)
 vllm_port: 8001
 
-# Modell für vLLM — AWQ INT4 (Qwen3.6-35B-A3B ≈ 20 GB Gewichte, MoE mit ~3B aktiv).
-# Wird über BEIDE RTX 5060 Ti (2×16 GB) verteilt (Parallelismus s. unten).
+# Modell für vLLM — Qwen3.8-27B W4A16 (≈19.5 GB INT4, Dense, Multimodal/VLM).
+# Wird über BEIDE RTX 5060 Ti (2×16 GB) verteilt (TP=2).
+# compressed-tensors W4A16 wird von vLLM aus der quantization_config
+# AUTO-ERKANNT — daher vllm_quantization: "none" (kein Flag nötig).
 # Alternativen (alle real, passen in 32 GB):
-#   Qwen/Qwen3.6-27B-AWQ                 (~18 GB, Dense, Multimodal)
-#   cyankiwi/Qwen3.5-35B-A3B-AWQ-4bit   (~20 GB, MoE, Vorgänger von 3.6)
-#   Qwen/Qwen3-14B-AWQ                   (~10 GB, schneller; tensor=1, pipeline=1)
-vllm_model: "cyankiwi/Qwen3.6-35B-A3B-AWQ-4bit"
+#   Qwen/Qwen3.8-27B-FP8                  (~28 GB, offiziell, KV knapper)
+#   cyankiwi/Qwen3.6-35B-A3B-AWQ-4bit    (~20 GB, MoE Vorgänger — quantization: "awq_marlin")
+#   Qwen/Qwen3-14B-AWQ                    (~10 GB, schneller; tensor=1, quantization: "awq_marlin")
+vllm_model: "philbert440/Qwen3.8-27B-W4A16-AWQ"
 
-# Blackwell (sm_120): AWQ läuft stabil mit dem Marlin-Kernel.
-vllm_quantization: "awq_marlin"   # awq_marlin | gptq_marlin | fp8 | none
+# Quantisierung: "none" = aus Checkpoint auto-erkennen (hier: compressed-tensors
+# W4A16, g128 → Marlin-Kernel auf sm_120). "awq_marlin" NUR für echte AWQ-
+# Checkpoints (Qwen/Qwen3-*-AWQ) — ein falsches Flag bricht das Laden.
+vllm_quantization: "none"   # none | awq_marlin | gptq_marlin | fp8
 
-# Attention-Backend für Blackwell + Qwen3.6 (Gated DeltaNet MoE):
+# Attention-Backend für Blackwell + Qwen3.8 (GatedDeltaNet hybrid):
 # TRITON_ATTN funktioniert out-of-the-box und ist kompatibel mit der
 # hybriden Attention-Architektur. FLASH_ATTN ist auf sm_120 defekt;
 # FLASHINFER braucht eine JIT-Toolchain (gcc, python3-dev, nvcc, ninja).
@@ -68,29 +80,42 @@ vllm_enforce_eager: true
 # Tool-/Function-Calling (OpenAI-kompatibel).
 vllm_enable_tool_calling: true
 # Parser MUSS zum Tool-Format des Modells passen:
-#   qwen3_coder  → Qwen3.5/3.6 (alle Varianten inkl. MoE A3B) — offiziell empfohlen
+#   qwen3_coder  → Qwen3.5/3.6/3.8 (alle Varianten, inkl. Qwen3.8-27B) — offiziell
 #   hermes       → Qwen3 dense/MoE (älter), Qwen2.5, QwQ
-#   qwen3_coder ist auch für Nicht-Coder-Modelle korrekt (Qwen3.6 änderte das Format)
+#   qwen3_coder ist auch für Nicht-Coder-Modelle korrekt (Qwen3.5+ änderte das Format)
 vllm_tool_call_parser: "qwen3_coder"
 
 # Reasoning-Parser für Qwen3 (<think>…</think> → reasoning_content). Leer = aus.
 vllm_reasoning_parser: "qwen3"
 
 # Kontext und Parallelität — volle GPU verfügbar (kein Co-Tenant)
-# 65536 (64K) für den Hermes-Agenten. Möglich durch fp8-KV-Cache + YaRN (unten).
-# Falls 64K nicht gebraucht wird: 32768 setzen + vllm_rope_scaling leer → spart
-# ~4 GB KV-VRAM, mehr Platz für Batching.
-vllm_max_model_len: 65536
+# MAXIMIERT: 262144 = die volle NATIVE Kontextlänge von Qwen3.8-27B (kein YaRN
+# nötig, keine Qualitätseinbuße durch RoPE-Scaling). KV-Bedarf: hybride
+# Attention (nur 16 Full-Attention-Layer + GQA) → fp8 ≈ 8 KiB/Token/GPU (TP=2)
+# → 262K ≈ 2.1 GiB KV total. Passt locker neben 19.5 GB Gewichten.
+# > 262K (bis 1M) geht via YaRN-Override, verschlechtert aber kurze Kontexte —
+# siehe Kommentar bei vllm_rope_scaling.
+vllm_max_model_len: 262144
 vllm_gpu_memory_utilization: "0.95"   # 0.95 sicher (kein Co-Tenant, Ollama aus)
-vllm_max_num_seqs: 8              # Limitiert: ~12 GB KV-Rest bei 20 GB Gewichten
-                                  # 65K ctx @ fp8 ≈ 8 GB/Seq → max ~1-2 volle Seqs,
-                                  # aber im Schnitt kürzere Kontexte → 8 ist sicher
+vllm_max_num_seqs: 4              # 262K @ fp8 ≈ 2.1 GiB KV/Seq → ~4 volle Seqs
+                                  # gleichzeitig; im Schnitt kürzere Kontexte →
+                                  # Scheduler packt weit mehr rein (KV-Pool total
+                                  # ~9-10 GiB ≈ 1.2M Tokens). Wer viele kurze
+                                  # Requests fährt, kann auf 8-16 hoch.
 
 # Max Tokens pro Batch (Chunked-Prefill-Größe).
-# MUSS >= Mamba block_size sein (Qwen3.6 hybrid: 2096). Default 2048 crasht mit:
+# MUSS >= Mamba block_size sein (Qwen3.6/3.8 hybrid, GatedDeltaNet: 2096).
+# Default 2048 crasht mit:
 #   "AssertionError: block_size (2096) must be <= max_num_batched_tokens (2048)"
 # 4096 = sicherer Wert, gute Balance zwischen Prefill-Throughput und Aktivierungs-VRAM.
 vllm_max_num_batched_tokens: 4096
+
+# Speculative Decoding (MTP): DEAKTIVIERT zugunsten max. Kontext/KV-Pool.
+# Qwen3.8-27B hat einen eingebauten MTP-Draft-Head (~2-3× schnelleres Decode,
+# K=2 mit ~92% Acceptance validiert). Der MTP-Head kostet aber ~0.85 GiB VRAM
+# (BF16) — bei maximiertem Kontext ist der KV-Pool wertvoller. Zum Aktivieren:
+#   vllm_speculative_config: '{"method":"mtp","num_speculative_tokens":2}'
+vllm_speculative_config: ""
 
 # Prefix Caching — KV-Cache für wiederkehrende Prompt-Präfixe (System-Prompts,
 # Tool-Definitionen) wiederverwenden. Kostenlos 50-80% TTFT-Verbesserung bei
@@ -101,14 +126,18 @@ vllm_enable_prefix_caching: true
 # Abrufbar unter: curl http://localhost:8001/metrics
 # Zum Deaktivieren: --disable-metrics in vllm_start.sh.j2 ergänzen.
 
-# --- 64K-Kontext: VRAM-Hebel -------------------------------------
-# 1) fp8-KV-Cache halbiert den KV-VRAM (0.25→0.125 MiB/Token) → 64K ≈ 8 GiB
-#    KV total, mit TP=2 also ~4 GiB/GPU. DER entscheidende Hebel.
-vllm_kv_cache_dtype: "fp8"          # "auto" = fp16 (doppelter KV-Bedarf)
+# --- Max. Kontext: VRAM-Hebel ------------------------------------
+# 1) fp8-KV-Cache halbiert den KV-VRAM. Bei Qwen3.8-27B (nur 16 Full-Attention-
+#    Layer, GQA 4 KV-Heads) ist KV ohnehin billig: fp8 ≈ 8 KiB/Token/GPU (TP=2)
+#    → 262K-Kontext ≈ 2.1 GiB/Sequenz total. bf16 wäre doppelt so viel.
+vllm_kv_cache_dtype: "fp8"          # "auto" = bf16 (doppelter KV-Bedarf)
 
-# 2) Qwen3.6 unterstützt NATIV bis zu 262.144 Token — kein RoPE-Scaling nötig für 65K!
-#    (Qwen3-32B brauchte YaRN weil nur 32K nativ. Qwen3.6 hat das nicht mehr nötig.)
-#    Leer lassen = nativen Context nutzen. Nur setzen falls > 262K gewünscht.
+# 2) 262144 ist die NATIVE Kontextlänge von Qwen3.8-27B — kein RoPE-Scaling!
+#    (Qwen3-32B brauchte YaRN weil nur 32K nativ.) Leer lassen.
+#    Falls jemals > 262K (bis 1M) gebraucht: YaRN via Nested-Override —
+#    in vllm_start.sh.j2 das --hf-overrides durch ersetzen:
+#      '{"text_config":{"rope_parameters":{"mrope_interleaved":true,"mrope_section":[11,11,10],"rope_type":"yarn","rope_theta":10000000,"partial_rotary_factor":0.25,"factor":4.0,"original_max_position_embeddings":262144}}}'
+#    Achtung: statisches YaRN verschlechtert kurze Kontexte leicht.
 vllm_rope_scaling: ""
 
 # 3) FALLBACK, falls VRAM trotz fp8 noch knapp: Gewichte in die 64 GB RAM
@@ -122,8 +151,9 @@ vllm_cpu_offload_gb: 0
 #         Skaliert gut bei hoher Concurrency (8+).
 #   TP=2: All-Reduce pro Layer über PCIe, aber beide GPUs immer busy.
 #         Besser bei niedriger Concurrency (typischer Agent-Workload).
-# Empfehlung für Agent-Workloads: TP=2 testen. Falls bei 8+ parallelen
-# Requests PP=2 besser ist, zurückwechseln.
+# Qwen3.8-27B ist DENSE (64 Layer) → sauberer Layer-Split für beides;
+# TP=2 bleibt die Empfehlung für Agent-Workloads (1-4 parallele Requests).
+# Falls bei 8+ parallelen Requests PP=2 besser misst, zurückwechseln.
 vllm_tensor_parallel_size: 2
 vllm_pipeline_parallel_size: 1
 
@@ -131,6 +161,20 @@ vllm_pipeline_parallel_size: 1
 # Für öffentliche Qwen-Modelle NICHT nötig → leer lassen.
 # Für gated models: per Ansible-Vault oder -e übergeben, NIEMALS hier committen!
 vllm_hf_token: ""
+
+# --- Resilience / Watchdogs -----------------------------------
+# vLLM- und VPN-Verbindung automatisch überwachen und bei Ausfall neu starten.
+resilience_enabled: true
+resilience_vllm_enabled: true
+resilience_vpn_enabled: true
+
+# VPN-Typ: "auto" erkennt WireGuard/OpenVPN/Tailscale/ZeroTier automatisch.
+# Alternativ explizit: "wireguard", "openvpn", "tailscale", "zerotier", "custom".
+resilience_vpn_type: "auto"
+
+# Optional: Host, der nur über das VPN erreichbar sein sollte (z.B. Tailscale-MagicDNS).
+# Leer lassen, wenn nur der lokale VPN-Status/Interface geprüft werden soll.
+resilience_vpn_remote_probe_host: ""
 
 # --- NVIDIA ---------------------------------------------------
 # Treiber-Installationsmethode: "ubuntu-drivers" oder "manual"

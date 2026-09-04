@@ -1,0 +1,24 @@
+[Unit]
+Description=vLLM Health Watchdog
+Documentation=https://docs.vllm.ai
+After=vllm.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+ExecStart={{ vllm_install_dir }}/watchdog/vllm-watchdog.sh
+Restart=always
+RestartSec=30
+
+# Logs landen im Journal
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vllm-watchdog
+
+# Sicherstellen, dass systemctl und curl verfügbar sind
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+[Install]
+WantedBy=multi-user.target

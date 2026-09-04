@@ -84,9 +84,11 @@
         path: "{{ vllm_venv_dir }}/bin/vllm"
       register: vllm_binary
 
+    # Qwen3.8 braucht vLLM >= 0.17 (Qwen3_5-Architektur + MTP).
+    # state: present lässt ältere Installationen stehen → mindestens 0.17 erzwingen.
     - name: vLLM installieren (inkl. CUDA-Runtime via PyTorch)
       ansible.builtin.pip:
-        name: "vllm"
+        name: "vllm>=0.17.0"
         state: present
         virtualenv: "{{ vllm_venv_dir }}"
         extra_args: "--no-cache-dir"

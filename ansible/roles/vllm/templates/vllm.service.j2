@@ -21,6 +21,10 @@ StandardError=append:{{ vllm_log_dir }}/vllm.log
 # Neustart-Verhalten
 Restart={{ vllm_service_restart }}
 RestartSec={{ vllm_service_restart_sec }}
+# Keine Begrenzung der Neustarts, damit der Dienst nach Treiber-/CUDA-
+# Fehlern oder OOM-Situationen nicht dauerhaft deaktiviert wird.
+StartLimitIntervalSec=0
+StartLimitBurst=0
 
 # Ressourcen-Limits
 # OOM-Killer soll andere Prozesse bevorzugen, nicht vLLM
@@ -32,11 +36,15 @@ LimitNOFILE=65536
 # GPU-Zugriff sicherstellen
 Environment=CUDA_VISIBLE_DEVICES=0,1
 Environment=HF_HOME={{ vllm_hf_cache_dir }}
+Environment=PYTHONUNBUFFERED=1
 
-# Timeout: vLLM-Start dauert 1–3 Minuten wegen Modell-Laden
-TimeoutStartSec=300
-TimeoutStopSec=30
+# Timeout: vLLM-Start dauert 1–5 Minuten wegen Modell-Download/-Laden.
+# StartLimit ist ausgeschaltet, daher kann der Service beliebig oft neu versuchen.
+TimeoutStartSec=600
+TimeoutStopSec=120
+
+# Sicherstellen, dass auch Kindprozesse (Worker, NCCL-Threads) ordentlich beendet werden.
+KillMode=mixed
 
 [Install]
 WantedBy=multi-user.target
-

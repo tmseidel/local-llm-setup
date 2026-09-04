@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# ============================================================
+#  vLLM Watchdog
+#  Generiert von Ansible — nicht manuell bearbeiten.
+# ============================================================
+set -euo pipefail
+
+readonly SERVICE_NAME="{{ resilience_vllm_service_name }}"
+readonly HEALTH_URL="{{ resilience_vllm_health_url }}"
+# Optional: prüfe zusätzlich, ob das Modell gelistet ist
+readonly API_URL="{{ resilience_vllm_api_url }}"
+readonly CHECK_INTERVAL={{ resilience_vllm_check_interval }}
+readonly CHECK_TIMEOUT={{ resilience_vllm_check_timeout }}
+readonly FAIL_THRESHOLD={{ resilience_vllm_fail_threshold }}
+readonly MAX_RESTARTS={{ resilience_vllm_max_restarts }}
+readonly RESTART_WINDOW={{ resilience_vllm_restart_window }}
+
+readonly STATE_DIR="/var/lib/vllm-watchdog"
+readonly STATE_FILE="${STATE_DIR}/restarts"
+readonly FAIL_FILE="${STATE_DIR}/consecutive_failures"
+
+mkdir -p "${STATE_DIR}"
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] vllm-watchdog: $*" | systemd-cat -t vllm-watchdog -p info
+}
+
+log_err() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] vllm-watchdog: $*" | systemd-cat -t vllm-watchdog -p err
+}
+
+# Zustand: aufeinanderfolgende Fehler
+get_fail_count() {
+    if [[ -f "${FAIL_FILE}" ]]; then
+        cat "${FAIL_FILE}"
+    else
+        echo 0
+    fi
+}
+
+set_fail_count() {
+    echo "$1" > "${FAIL_FILE}"
+}
+
+# Restart-Tracking im Zeitfenster (Sliding-Window): jeder Restart schreibt einen Timestamp.
+# Einträge außerhalb des Fensters werden entfernt.
+record_restart() {
+    local now epoch
+    now=$(date +%s)
+    mkdir -p "${STATE_DIR}"
+    touch "${STATE_FILE}"
+    echo "${now}" >> "${STATE_FILE}"
+    # Alte Einträge entfernen
+    epoch=$(( now - RESTART_WINDOW ))
+    awk -v cutoff="${epoch}" '$1 > cutoff {print}' "${STATE_FILE}" > "${STATE_FILE}.tmp" || true
+    mv "${STATE_FILE}.tmp" "${STATE_FILE}"
+}
+
+restart_count_in_window() {
+    local now epoch
+    now=$(date +%s)
+    epoch=$(( now - RESTART_WINDOW ))
+    if [[ -f "${STATE_FILE}" ]]; then
+        awk -v cutoff="${epoch}" '$1 > cutoff {count++} END {print count+0}' "${STATE_FILE}"
+    else
+        echo 0
+    fi
+}
+
+# Prüft, ob vLLM gesund ist.
+# Gibt 0 zurück, wenn /health 200 liefert (und optional /v1/models etwas zurückgibt).
+check_vllm() {
+    local http_code body
+    http_code=$(curl -s -o /dev/null -w '%{http_code}' --max-time "${CHECK_TIMEOUT}" "${HEALTH_URL}" || true)
+    if [[ "${http_code}" != "200" ]]; then
+        log_err "Health-Check fehlgeschlagen: HTTP ${http_code} von ${HEALTH_URL}"
+        return 1
+    fi
+
+    # Zusätzliche API-Sanity: mindestens ein Modell gelistet?
+    body=$(curl -s --max-time "${CHECK_TIMEOUT}" "${API_URL}" || true)
+    if [[ -z "${body}" ]] || ! echo "${body}" | grep -q '"data"'; then
+        log_err "API-Sanity-Check fehlgeschlagen: unerwartete Antwort von ${API_URL}"
+        return 1
+    fi
+
+    return 0
+}
+
+# Einzelner Check-Durchlauf
+run_check() {
+    # Wenn vLLM explizit deaktiviert wurde (z.B. Engine-Wechsel zu Ollama),
+    # soll der Watchdog nichts tun.
+    if ! systemctl is-enabled --quiet "${SERVICE_NAME}" 2>/dev/null; then
+        log "${SERVICE_NAME} ist nicht enabled (Engine-Wechsel?) — Watchdog pausiert"
+        set_fail_count 0
+        return 0
+    fi
+
+    # Noch am Starten? Dann keinen Fehler zählen (Modell-Laden dauert Minuten).
+    local active_state
+    active_state=$(systemctl show -p ActiveState --value "${SERVICE_NAME}" 2>/dev/null || echo "unknown")
+    case "${active_state}" in
+        activating)
+            log "${SERVICE_NAME} startet noch (ActiveState=activating) — überspringe Health-Check"
+            set_fail_count 0
+            return 0
+            ;;
+        failed)
+            log_err "${SERVICE_NAME} ist im Zustand 'failed' — versuche Neustart"
+            ;;
+    esac
+
+    if check_vllm; then
+        set_fail_count 0
+        log "vLLM gesund (${HEALTH_URL})"
+        return 0
+    fi
+
+    local fails
+    fails=$(get_fail_count)
+    fails=$(( fails + 1 ))
+    set_fail_count "${fails}"
+    log_err "vLLM nicht gesund (Fehler ${fails}/${FAIL_THRESHOLD})"
+
+    if [[ "${fails}" -ge "${FAIL_THRESHOLD}" ]]; then
+        local restarts
+        restarts=$(restart_count_in_window)
+        if [[ "${restarts}" -ge "${MAX_RESTARTS}" ]]; then
+            log_err "Zu viele Restarts (${restarts}/${MAX_RESTARTS}) innerhalb von ${RESTART_WINDOW}s — gebe auf."
+            return 1
+        fi
+
+        log "Starte ${SERVICE_NAME} neu (Restart ${restarts}+1/${MAX_RESTARTS} in ${RESTART_WINDOW}s) ..."
+        if systemctl restart "${SERVICE_NAME}"; then
+            record_restart
+            set_fail_count 0
+            log "${SERVICE_NAME} erfolgreich neu gestartet"
+        else
+            log_err "systemctl restart ${SERVICE_NAME} fehlgeschlagen"
+        fi
+    fi
+}
+
+# Main-Loop: wird von systemd als einfacher Service (Type=simple) gestartet.
+log "vLLM-Watchdog gestartet: ${HEALTH_URL} alle ${CHECK_INTERVAL}s, Schwellwert ${FAIL_THRESHOLD}"
+while true; do
+    run_check || true
+    sleep "${CHECK_INTERVAL}"
+done

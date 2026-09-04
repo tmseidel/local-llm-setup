@@ -1,0 +1,23 @@
+---
+# ============================================================
+#  Handler: resilience
+# ============================================================
+
+- name: systemd neu laden
+  ansible.builtin.systemd:
+    daemon_reload: true
+  listen: systemd neu laden
+
+- name: vLLM Watchdog neu starten
+  ansible.builtin.systemd:
+    name: vllm-watchdog
+    state: restarted
+  listen: vLLM Watchdog neu starten
+  when: resilience_vllm_enabled | default(true) | bool
+
+- name: VPN Watchdog neu starten
+  ansible.builtin.systemd:
+    name: vpn-watchdog
+    state: restarted
+  listen: VPN Watchdog neu starten
+  when: resilience_vpn_enabled | default(true) | bool

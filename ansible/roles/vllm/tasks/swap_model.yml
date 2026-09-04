@@ -6,7 +6,7 @@
 #  Usage:
 #    ansible-playbook -i inventory.ini site.yml \
 #      --tags vllm_swap \
-#      -e "vllm_model=Qwen/Qwen2.5-Coder-32B-Instruct-AWQ"
+#      -e "vllm_model=Qwen/Qwen3.8-27B-FP8 vllm_quantization=none"
 # ============================================================
 
 - name: Stop vLLM service

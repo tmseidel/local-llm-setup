@@ -19,15 +19,15 @@ vllm_user: "{{ ansible_user }}"
 vllm_host: "0.0.0.0"
 vllm_port: 8001            # Kein Konflikt mit Ollama auf 11434
 
-# Modell — AWQ INT4 für optimale tok/s pro VRAM-GB.
+# Modell — Qwen3.8-27B W4A16 (compressed-tensors INT4, ~19.5 GB, MTP-Head intakt).
 # Reale Alternativen, die mit TP=2 in 2×16 GB passen:
-#   Qwen/Qwen3-32B-AWQ                  (AWQ INT4, ~19 GB — Default)
-#   Qwen/Qwen2.5-Coder-32B-Instruct-AWQ (AWQ INT4, ~19 GB — Coding)
-#   Qwen/Qwen3-14B-AWQ                  (AWQ INT4, ~10 GB — schneller)
-vllm_model: "Qwen/Qwen3-32B-AWQ"
+#   Qwen/Qwen3.8-27B-FP8               (~28 GB, offiziell, KV knapper)
+#   Qwen/Qwen3-14B-AWQ                 (~10 GB, schneller — quantization: "awq_marlin")
+vllm_model: "philbert440/Qwen3.8-27B-W4A16-AWQ"
 
-# Blackwell (sm_120): AWQ über den Marlin-Kernel.
-vllm_quantization: "awq_marlin"   # awq_marlin | gptq_marlin | fp8 | none
+# "none" = Quantisierung aus dem Checkpoint auto-erkennen (hier: compressed-tensors
+# W4A16 → Marlin-Kernel auf Blackwell sm_120). "awq_marlin" nur für echte AWQ-Repos.
+vllm_quantization: "none"   # none | awq_marlin | gptq_marlin | fp8
 
 # Attention-Backend (Blackwell-tauglich). FLASH_ATTN ist auf sm_120 defekt.
 vllm_attention_backend: "TRITON_ATTN"
@@ -39,21 +39,28 @@ vllm_reasoning_parser: "qwen3"
 # Tool-/Function-Calling (OpenAI-kompatibel) aktivieren.
 vllm_enable_tool_calling: true
 # Parser MUSS zum Modell-Tool-Format passen:
+#   qwen3_coder   → Qwen3.5/3.6/3.8 (alle Varianten, inkl. Qwen3.8-27B) — offiziell
 #   hermes        → Qwen3 (dense/instruct, z.B. Qwen3-32B), Qwen2.5, QwQ
-#   qwen3_coder   → NUR Qwen3-Coder-Modelle (anderes XML-Format)
 # Falscher Parser = Tool-Calls werden nicht als `tool_calls` erkannt.
-vllm_tool_call_parser: "hermes"
+vllm_tool_call_parser: "qwen3_coder"
 
-# CUDA-Graphs deaktivieren — MoE + TP über PCIe (kein NVLink/P2P) führt mit
-# CUDA Graphs zu Deadlocks in der Shared-Memory-Kommunikation zwischen Workern
-# (sample_tokens Timeout nach langer Generierung).
+# Speculative Decoding (MTP): Qwen3.8-27B hat einen eingebauten MTP-Draft-Head.
+# K=2 validiert (~92% Acceptance) → ~2-3× schnelleres Decode, kostet ~0.85 GiB.
+# Default: aus (max. Kontext/KV-Pool). In group_vars überschreiben.
+vllm_speculative_config: ""
+
+# CUDA-Graphs deaktivieren — hybride Attention (GatedDeltaNet) + TP über PCIe
+# (kein NVLink/P2P) führt mit CUDA Graphs zu Deadlocks in der Shared-Memory-
+# Kommunikation zwischen Workern (sample_tokens Timeout nach langer Generierung).
 vllm_enforce_eager: true
 
-# Kontext & Speicher — eine Engine zur Zeit, daher volle GPU nutzbar
-vllm_max_model_len: 65536
+# Kontext & Speicher — eine Engine zur Zeit, daher volle GPU nutzbar.
+# Qwen3.8-27B: 262K nativ, KV billig (16 Full-Attention-Layer, GQA) →
+# 262K @ fp8 ≈ 2.1 GiB/Sequenz total.
+vllm_max_model_len: 262144
 vllm_gpu_memory_utilization: "0.95"
-vllm_max_num_seqs: 32      # Maximale parallele Sequences (gut für Agenten)
-vllm_max_num_batched_tokens: 4096  # Muss >= Mamba block_size (Qwen3.6: 2096)
+vllm_max_num_seqs: 4       # Volle 262K-Seqs parallel; kürzere → mehr
+vllm_max_num_batched_tokens: 4096  # Muss >= Mamba block_size (GatedDeltaNet: 2096)
 
 # KV-Cache-Quantisierung. fp8 halbiert den KV-VRAM-Bedarf (2→1 Byte/Elem)
 # → ~doppelte Kontextlänge bei nahezu identischer Qualität. Auf Blackwell nativ.
@@ -74,10 +81,10 @@ vllm_enable_chunked_prefill: true
 # aktiviert — kein Flag nötig. Abrufbar unter: curl http://localhost:8001/metrics
 # Zum Deaktivieren: --disable-metrics in vllm_start.sh.j2 ergänzen.
 
-# RoPE-Scaling (YaRN), um über die native Kontextlänge (Qwen3 = 32768) hinaus
-# zu gehen. Für 64K: factor 2.0 (32768×2=65536). Leer = aus (native Länge).
-# Statischer Faktor verschlechtert kurze Kontexte leicht — nur so groß wie nötig.
-vllm_rope_scaling: '{"rope_type":"yarn","factor":2.0,"original_max_position_embeddings":32768}'
+# RoPE-Scaling (YaRN) — für Qwen3.8-27B NICHT nötig (262K nativ). Leer = aus.
+# Falls > 262K: Nested-Override in vllm_start.sh.j2 anpassen
+# (text_config.rope_parameters, factor 4.0 für 1M).
+vllm_rope_scaling: ""
 
 # Modellgewichte in den CPU-RAM auslagern (GiB pro GPU), um VRAM für KV-Cache
 # freizumachen. Nutzt die 64 GB RAM. ACHTUNG: Gewichte streamen pro Forward-Pass

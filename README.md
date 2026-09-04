@@ -15,6 +15,7 @@ stopped + disabled, so the active engine uses the **full 32 GB VRAM**.
 - **vLLM** — parallel agent workloads, tensor parallelism across both GPUs,
   AWQ (`awq_marlin`), Blackwell-compatible (`VLLM_ATTENTION_BACKEND=TRITON_ATTN`).
 - **Ollama** — single requests, easy model switching, Open WebUI backend.
+- **Resilience** — systemd watchdogs auto-restart vLLM and the VPN connection on failure.
 
 ## Quick Start
 

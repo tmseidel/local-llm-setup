@@ -12,6 +12,7 @@
 #    ansible-playbook -i inventory.ini site.yml --tags webui
 #    ansible-playbook -i inventory.ini site.yml --tags models
 #    ansible-playbook -i inventory.ini site.yml --tags vllm
+#    ansible-playbook -i inventory.ini site.yml --tags resilience
 #
 #  vLLM deaktivieren:
 #    ansible-playbook -i inventory.ini site.yml -e "vllm_enabled=false"
@@ -71,6 +72,9 @@
 
     - role: vllm
       tags: vllm
+
+    - role: resilience
+      tags: resilience
 
   post_tasks:
     - name: Ollama-Modelle herunterladen

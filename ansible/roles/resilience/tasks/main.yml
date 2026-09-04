@@ -1,0 +1,107 @@
+---
+# ============================================================
+#  Rolle: resilience
+#  Stellt sicher, dass vLLM und (optional) eine VPN-Verbindung
+#  laufen und bei Ausfall automatisch neu gestartet werden.
+# ============================================================
+
+- name: Resilience-Block (nur wenn resilience_enabled = true)
+  when: resilience_enabled | bool
+  block:
+
+    # ── Verzeichnisse ────────────────────────────────────────
+
+    - name: Watchdog-Verzeichnis anlegen
+      ansible.builtin.file:
+        path: "{{ vllm_install_dir }}/watchdog"
+        state: directory
+        owner: "{{ vllm_user }}"
+        group: "{{ vllm_user }}"
+        mode: '0755'
+
+    - name: Watchdog-Zustandsverzeichnis anlegen
+      ansible.builtin.file:
+        path: "/var/lib/vllm-watchdog"
+        state: directory
+        owner: root
+        group: root
+        mode: '0750'
+
+    - name: VPN-Watchdog-Zustandsverzeichnis anlegen
+      ansible.builtin.file:
+        path: "/var/lib/vpn-watchdog"
+        state: directory
+        owner: root
+        group: root
+        mode: '0750'
+
+    # ── vLLM Watchdog ────────────────────────────────────────
+
+    - name: vLLM Watchdog-Skript deployen
+      ansible.builtin.template:
+        src: vllm-watchdog.sh.j2
+        dest: "{{ vllm_install_dir }}/watchdog/vllm-watchdog.sh"
+        owner: root
+        group: root
+        mode: '0755'
+      notify:
+        - vLLM Watchdog neu starten
+      when: resilience_vllm_enabled | bool
+
+    - name: vLLM Watchdog Service deployen
+      ansible.builtin.template:
+        src: vllm-watchdog.service.j2
+        dest: /etc/systemd/system/vllm-watchdog.service
+        owner: root
+        group: root
+        mode: '0644'
+      notify:
+        - systemd neu laden
+        - vLLM Watchdog neu starten
+      when: resilience_vllm_enabled | bool
+
+    - name: vLLM Watchdog aktivieren und starten
+      ansible.builtin.systemd:
+        name: vllm-watchdog
+        state: started
+        enabled: true
+        daemon_reload: true
+      when: resilience_vllm_enabled | bool
+
+    # ── VPN Watchdog ─────────────────────────────────────────
+
+    - name: VPN Watchdog-Skript deployen
+      ansible.builtin.template:
+        src: vpn-watchdog.sh.j2
+        dest: "{{ vllm_install_dir }}/watchdog/vpn-watchdog.sh"
+        owner: root
+        group: root
+        mode: '0755'
+      notify:
+        - VPN Watchdog neu starten
+      when: resilience_vpn_enabled | bool
+
+    - name: VPN Watchdog Service deployen
+      ansible.builtin.template:
+        src: vpn-watchdog.service.j2
+        dest: /etc/systemd/system/vpn-watchdog.service
+        owner: root
+        group: root
+        mode: '0644'
+      notify:
+        - systemd neu laden
+        - VPN Watchdog neu starten
+      when: resilience_vpn_enabled | bool
+
+    - name: VPN Watchdog aktivieren und starten
+      ansible.builtin.systemd:
+        name: vpn-watchdog
+        state: started
+        enabled: true
+        daemon_reload: true
+      when: resilience_vpn_enabled | bool
+
+- name: Hinweis wenn Resilience deaktiviert
+  ansible.builtin.debug:
+    msg: "Resilience-Watchdogs sind deaktiviert (resilience_enabled: false)."
+  when: not resilience_enabled | bool

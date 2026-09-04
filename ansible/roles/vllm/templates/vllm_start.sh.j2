@@ -66,6 +66,9 @@ exec {{ vllm_venv_dir }}/bin/vllm serve "{{ vllm_model }}" \
 {% if vllm_cpu_offload_gb | int > 0 %}
   --cpu-offload-gb {{ vllm_cpu_offload_gb }} \
 {% endif %}
+{% if vllm_speculative_config | default("") != "" %}
+  --speculative-config '{{ vllm_speculative_config }}' \
+{% endif %}
   --max-num-seqs {{ vllm_max_num_seqs }} \
 {% if vllm_max_num_batched_tokens is defined %}
   --max-num-batched-tokens {{ vllm_max_num_batched_tokens }} \

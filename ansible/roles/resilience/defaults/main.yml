@@ -1,0 +1,65 @@
+---
+# ============================================================
+#  Resilience / Watchdog Rolle — Standardwerte
+#  Überschreiben in group_vars/all.yml
+# ============================================================
+
+# Globaler Schalter für die komplette Resilience-Rolle
+resilience_enabled: true
+
+# ------------------------------------------------------------------
+# vLLM Watchdog
+# ------------------------------------------------------------------
+resilience_vllm_enabled: true
+resilience_vllm_service_name: "vllm"
+resilience_vllm_health_url: "http://localhost:{{ vllm_port | default(8001) }}/health"
+resilience_vllm_api_url: "http://localhost:{{ vllm_port | default(8001) }}/v1/models"
+# Intervall zwischen Checks (Sekunden)
+resilience_vllm_check_interval: 30
+# Wie viele aufeinanderfolgende Fehler nötig sind, bevor ein Restart getriggert wird.
+# vLLM braucht nach dem Prozessstart noch 1–3 Minuten für das Modell-Laden;
+# daher ein großzügiger Wert (10 × 30s = 5 Minuten).
+resilience_vllm_fail_threshold: 10
+# Timeout für den HTTP-Health-Check (Sekunden)
+resilience_vllm_check_timeout: 10
+# Maximale Anzahl Restart-Versuche innerhalb von vllm_watchdog_window,
+# bevor der Watchdog aufgibt und es manuell untersucht werden muss
+resilience_vllm_max_restarts: 5
+resilience_vllm_restart_window: 3600
+
+# ------------------------------------------------------------------
+# VPN Watchdog
+# ------------------------------------------------------------------
+resilience_vpn_enabled: true
+# VPN-Typ: "auto" (Erkennung), "wireguard", "openvpn", "tailscale", "zerotier", "custom"
+resilience_vpn_type: "auto"
+
+# --- WireGuard ---
+# Interface-Name, z.B. "wg0". Leer = auto-detect erstes wg-* Interface.
+resilience_vpn_wg_interface: ""
+
+# --- OpenVPN ---
+# Config-Name, z.B. "client". Leer = auto-detect erste .ovpn-Config.
+resilience_vpn_ovpn_config: ""
+
+# --- Tailscale ---
+# Optional: Tailnet-Hostname oder MagicDNS-Name, der erreichbar sein sollte.
+# Leer = nur Interface/Service-Prüfung.
+resilience_vpn_tailscale_test_host: ""
+
+# --- ZeroTier ---
+# Network-ID, z.B. "abcdef1234567890". Leer = auto-detect aus 'zerotier-cli listnetworks'.
+resilience_vpn_zerotier_network: ""
+
+# --- Custom ---
+# Für nicht unterstützte VPN-Lösungen: eigene Prüf- und Reconnect-Befehle.
+resilience_vpn_custom_check_cmd: ""
+resilience_vpn_custom_reconnect_cmd: ""
+
+# Allgemeine VPN-Prüfparameter
+resilience_vpn_check_interval: 60
+resilience_vpn_fail_threshold: 2
+# Host, der ausschließlich über das VPN erreichbar sein sollte (optional).
+# Wenn gesetzt, wird ein ping durchgeführt. Leer = nur lokaler Interface-/Service-Check.
+resilience_vpn_remote_probe_host: ""
+resilience_vpn_remote_probe_timeout: 5

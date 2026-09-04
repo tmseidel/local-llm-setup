@@ -1,0 +1,359 @@
+#!/usr/bin/env bash
+# ============================================================
+#  VPN Watchdog
+#  Generiert von Ansible — nicht manuell bearbeiten.
+# ============================================================
+set -euo pipefail
+
+readonly VPN_TYPE="{{ resilience_vpn_type }}"
+readonly CHECK_INTERVAL={{ resilience_vpn_check_interval }}
+readonly FAIL_THRESHOLD={{ resilience_vpn_fail_threshold }}
+readonly REMOTE_PROBE_HOST="{{ resilience_vpn_remote_probe_host }}"
+readonly REMOTE_PROBE_TIMEOUT={{ resilience_vpn_remote_probe_timeout }}
+
+readonly WG_INTERFACE="{{ resilience_vpn_wg_interface }}"
+readonly OVPN_CONFIG="{{ resilience_vpn_ovpn_config }}"
+readonly TAILSCALE_TEST_HOST="{{ resilience_vpn_tailscale_test_host }}"
+readonly ZEROTIER_NETWORK="{{ resilience_vpn_zerotier_network }}"
+
+readonly CUSTOM_CHECK_CMD="{{ resilience_vpn_custom_check_cmd }}"
+readonly CUSTOM_RECONNECT_CMD="{{ resilience_vpn_custom_reconnect_cmd }}"
+
+readonly STATE_DIR="/var/lib/vpn-watchdog"
+readonly FAIL_FILE="${STATE_DIR}/consecutive_failures"
+
+mkdir -p "${STATE_DIR}"
+
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] vpn-watchdog: $*" | systemd-cat -t vpn-watchdog -p info
+}
+
+log_err() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] vpn-watchdog: $*" | systemd-cat -t vpn-watchdog -p err
+}
+
+get_fail_count() {
+    if [[ -f "${FAIL_FILE}" ]]; then
+        cat "${FAIL_FILE}"
+    else
+        echo 0
+    fi
+}
+
+set_fail_count() {
+    echo "$1" > "${FAIL_FILE}"
+}
+
+# --- Hilfsfunktionen für VPN-Typ-Erkennung ---
+
+detect_wg_interface() {
+    ip -o link show 2>/dev/null | awk -F': ' '/^[0-9]+: wg/ {print $2; exit}' || true
+}
+
+detect_ovpn_config() {
+    # systemd-basierte OpenVPN-Client-Units
+    systemctl list-units --type=service --state=running 'openvpn-client@*' 2>/dev/null \
+        | awk -F'@' '/openvpn-client@/ {gsub(/\.service.*/,"",$2); print $2; exit}' || true
+}
+
+detect_tailscale() {
+    if systemctl is-active --quiet tailscaled 2>/dev/null; then
+        echo "tailscale"
+    else
+        echo ""
+    fi
+}
+
+detect_zerotier_network() {
+    if command -v zerotier-cli &>/dev/null; then
+        zerotier-cli listnetworks 2>/dev/null | awk 'NR>1 && $3 ~ /OK|ACCESS_DENIED/ {print $1; exit}' || true
+    else
+        echo ""
+    fi
+}
+
+resolve_vpn_type() {
+    case "${VPN_TYPE}" in
+        auto)
+            if [[ -n "$(detect_wg_interface)" ]]; then
+                echo "wireguard"
+            elif [[ -n "$(detect_ovpn_config)" ]]; then
+                echo "openvpn"
+            elif [[ -n "$(detect_tailscale)" ]]; then
+                echo "tailscale"
+            elif [[ -n "$(detect_zerotier_network)" ]]; then
+                echo "zerotier"
+            else
+                echo "unknown"
+            fi
+            ;;
+        *)
+            echo "${VPN_TYPE}"
+            ;;
+    esac
+}
+
+# --- Prüflogik pro VPN-Typ ---
+
+check_wireguard() {
+    local iface="${WG_INTERFACE}"
+    if [[ -z "${iface}" ]]; then
+        iface=$(detect_wg_interface)
+    fi
+    if [[ -z "${iface}" ]]; then
+        log_err "Kein WireGuard-Interface gefunden"
+        return 1
+    fi
+
+    if ! ip link show "${iface}" &>/dev/null; then
+        log_err "WireGuard-Interface ${iface} nicht vorhanden"
+        return 1
+    fi
+
+    if [[ "$(cat /sys/class/net/${iface}/operstate 2>/dev/null || echo down)" != "up" ]]; then
+        log_err "WireGuard-Interface ${iface} ist down"
+        return 1
+    fi
+
+    log "WireGuard-Interface ${iface} ist up"
+    return 0
+}
+
+reconnect_wireguard() {
+    local iface="${WG_INTERFACE}"
+    if [[ -z "${iface}" ]]; then
+        iface=$(detect_wg_interface)
+    fi
+    if [[ -z "${iface}" ]]; then
+        log_err "Kann WireGuard nicht reconnecten: kein Interface bekannt"
+        return 1
+    fi
+    log "Starte WireGuard-Interface ${iface} neu ..."
+    systemctl restart "wg-quick@${iface}" || {
+        log_err "wg-quick@${iface} Neustart fehlgeschlagen"
+        return 1
+    }
+}
+
+check_openvpn() {
+    local cfg="${OVPN_CONFIG}"
+    if [[ -z "${cfg}" ]]; then
+        cfg=$(detect_ovpn_config)
+    fi
+    if [[ -z "${cfg}" ]]; then
+        log_err "Keine laufende OpenVPN-Client-Unit gefunden"
+        return 1
+    fi
+
+    if ! systemctl is-active --quiet "openvpn-client@${cfg}"; then
+        log_err "OpenVPN-Client ${cfg} läuft nicht"
+        return 1
+    fi
+
+    log "OpenVPN-Client ${cfg} läuft"
+    return 0
+}
+
+reconnect_openvpn() {
+    local cfg="${OVPN_CONFIG}"
+    if [[ -z "${cfg}" ]]; then
+        cfg=$(detect_ovpn_config)
+    fi
+    if [[ -z "${cfg}" ]]; then
+        log_err "Kann OpenVPN nicht reconnecten: keine Config bekannt"
+        return 1
+    fi
+    log "Starte OpenVPN-Client ${cfg} neu ..."
+    systemctl restart "openvpn-client@${cfg}" || {
+        log_err "openvpn-client@${cfg} Neustart fehlgeschlagen"
+        return 1
+    }
+}
+
+check_tailscale() {
+    if ! systemctl is-active --quiet tailscaled; then
+        log_err "tailscaled Service läuft nicht"
+        return 1
+    fi
+
+    if ! command -v tailscale &>/dev/null; then
+        log_err "tailscale CLI nicht gefunden"
+        return 1
+    fi
+
+    local status
+    status=$(tailscale status --self 2>/dev/null || true)
+    if [[ -z "${status}" ]]; then
+        log_err "tailscale status liefert keine Daten — evtl. nicht eingeloggt"
+        return 1
+    fi
+
+    if [[ -n "${TAILSCALE_TEST_HOST}" ]]; then
+        if ! timeout "${REMOTE_PROBE_TIMEOUT}" ping -c 1 -W "${REMOTE_PROBE_TIMEOUT}" "${TAILSCALE_TEST_HOST}" &>/dev/null; then
+            log_err "Tailscale-Test-Host ${TAILSCALE_TEST_HOST} nicht erreichbar"
+            return 1
+        fi
+    fi
+
+    log "Tailscale ist aktiv"
+    return 0
+}
+
+reconnect_tailscale() {
+    log "Starte tailscaled neu und versuche tailscale up ..."
+    systemctl restart tailscaled || true
+    sleep 2
+    if command -v tailscale &>/dev/null; then
+        tailscale up || {
+            log_err "tailscale up fehlgeschlagen"
+            return 1
+        }
+    fi
+}
+
+check_zerotier() {
+    if ! systemctl is-active --quiet zerotier-one; then
+        log_err "zerotier-one Service läuft nicht"
+        return 1
+    fi
+
+    if ! command -v zerotier-cli &>/dev/null; then
+        log_err "zerotier-cli nicht gefunden"
+        return 1
+    fi
+
+    local network="${ZEROTIER_NETWORK}"
+    if [[ -z "${network}" ]]; then
+        network=$(detect_zerotier_network)
+    fi
+    if [[ -z "${network}" ]]; then
+        log_err "Keine aktive ZeroTier-Network-ID gefunden"
+        return 1
+    fi
+
+    local line
+    line=$(zerotier-cli listnetworks 2>/dev/null | grep "${network}" || true)
+    if [[ -z "${line}" ]]; then
+        log_err "ZeroTier-Network ${network} nicht in listnetworks"
+        return 1
+    fi
+
+    if ! echo "${line}" | grep -qE 'OK|ACCESS_DENIED'; then
+        log_err "ZeroTier-Network ${network} Status nicht OK: ${line}"
+        return 1
+    fi
+
+    log "ZeroTier-Network ${network} ist aktiv"
+    return 0
+}
+
+reconnect_zerotier() {
+    local network="${ZEROTIER_NETWORK}"
+    if [[ -z "${network}" ]]; then
+        network=$(detect_zerotier_network)
+    fi
+    if [[ -z "${network}" ]]; then
+        log_err "Kann ZeroTier nicht reconnecten: keine Network-ID bekannt"
+        return 1
+    fi
+    log "Starte ZeroTier-Dienst neu und joine Network ${network} ..."
+    systemctl restart zerotier-one || true
+    sleep 2
+    zerotier-cli join "${network}" || {
+        log_err "zerotier-cli join ${network} fehlgeschlagen"
+        return 1
+    }
+}
+
+check_custom() {
+    if [[ -z "${CUSTOM_CHECK_CMD}" ]]; then
+        log_err "VPN-Typ 'custom' aktiv, aber resilience_vpn_custom_check_cmd nicht gesetzt"
+        return 1
+    fi
+    log "Führe Custom-Check aus: ${CUSTOM_CHECK_CMD}"
+    bash -c "${CUSTOM_CHECK_CMD}"
+}
+
+reconnect_custom() {
+    if [[ -z "${CUSTOM_RECONNECT_CMD}" ]]; then
+        log_err "VPN-Typ 'custom' aktiv, aber resilience_vpn_custom_reconnect_cmd nicht gesetzt"
+        return 1
+    fi
+    log "Führe Custom-Reconnect aus: ${CUSTOM_RECONNECT_CMD}"
+    bash -c "${CUSTOM_RECONNECT_CMD}"
+}
+
+# --- Generic remote probe (optional) ---
+
+check_remote_probe() {
+    if [[ -z "${REMOTE_PROBE_HOST}" ]]; then
+        return 0
+    fi
+    if timeout "${REMOTE_PROBE_TIMEOUT}" ping -c 1 -W "${REMOTE_PROBE_TIMEOUT}" "${REMOTE_PROBE_HOST}" &>/dev/null; then
+        return 0
+    fi
+    log_err "Remote-Probe ${REMOTE_PROBE_HOST} nicht erreichbar"
+    return 1
+}
+
+# --- Hauptlogik ---
+
+run_check() {
+    local active_type
+    active_type=$(resolve_vpn_type)
+
+    if [[ "${active_type}" == "unknown" ]]; then
+        log_err "Kein VPN-Typ erkannt (resilience_vpn_type={{ resilience_vpn_type }})"
+        # Kein Restart, da wir nicht wissen was zu tun ist; aber Fehler zählen.
+        return 1
+    fi
+
+    local check_ok=true
+    case "${active_type}" in
+        wireguard) check_wireguard || check_ok=false ;;
+        openvpn)   check_openvpn   || check_ok=false ;;
+        tailscale) check_tailscale || check_ok=false ;;
+        zerotier)  check_zerotier  || check_ok=false ;;
+        custom)    check_custom    || check_ok=false ;;
+        *)
+            log_err "Unbekannter VPN-Typ: ${active_type}"
+            check_ok=false
+            ;;
+    esac
+
+    if [[ "${check_ok}" == "true" ]]; then
+        if ! check_remote_probe; then
+            check_ok=false
+        fi
+    fi
+
+    if [[ "${check_ok}" == "true" ]]; then
+        set_fail_count 0
+        log "VPN (${active_type}) gesund"
+        return 0
+    fi
+
+    local fails
+    fails=$(get_fail_count)
+    fails=$(( fails + 1 ))
+    set_fail_count "${fails}"
+    log_err "VPN (${active_type}) nicht gesund (Fehler ${fails}/${FAIL_THRESHOLD})"
+
+    if [[ "${fails}" -ge "${FAIL_THRESHOLD}" ]]; then
+        log "Versuche VPN-Reconnect (${active_type}) ..."
+        case "${active_type}" in
+            wireguard) reconnect_wireguard || true ;;
+            openvpn)   reconnect_openvpn   || true ;;
+            tailscale) reconnect_tailscale || true ;;
+            zerotier)  reconnect_zerotier  || true ;;
+            custom)    reconnect_custom    || true ;;
+        esac
+        set_fail_count 0
+    fi
+}
+
+log "VPN-Watchdog gestartet (Typ: ${VPN_TYPE}, Intervall: ${CHECK_INTERVAL}s, Schwellwert: ${FAIL_THRESHOLD})"
+while true; do
+    run_check || true
+    sleep "${CHECK_INTERVAL}"
+done

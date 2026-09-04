@@ -1,0 +1,11 @@
+# Timer-basierte Alternative zum einfachen Service.
+# Wird derzeit NICHT verwendet — der Service läuft als Daemon (siehe vpn-watchdog.service).
+[Unit]
+Description=VPN Watchdog Timer (alternative)
+
+[Timer]
+OnBootSec=60
+OnUnitActiveSec={{ resilience_vpn_check_interval }}s
+
+[Install]
+WantedBy=timers.target
